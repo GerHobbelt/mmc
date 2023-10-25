@@ -2,7 +2,7 @@
 **  \mainpage Mesh-based Monte Carlo (MMC) - a 3D photon simulator
 **
 **  \author Qianqian Fang <q.fang at neu.edu>
-**  \copyright Qianqian Fang, 2010-2021
+**  \copyright Qianqian Fang, 2010-2023
 **
 **  \section sref Reference:
 **  \li \c (\b Fang2010) Qianqian Fang, <a href="http://www.opticsinfobase.org/abstract.cfm?uri=boe-1-1-165">
@@ -157,6 +157,8 @@ float mesh_getdetweight(int photonid, int colcount, float* ppath, mcconfig* cfg)
 void mesh_srcdetelem(tetmesh* mesh, mcconfig* cfg);
 void mesh_createdualmesh(tetmesh* mesh, mcconfig* cfg);
 void mesh_loadroi(tetmesh* mesh, mcconfig* cfg);
+double mesh_getreff_approx(double n_in, double n_out);
+double mesh_getreff(double n_in, double n_out);
 
 void tracer_init(raytracer* tracer, tetmesh* mesh, char methodid);
 void tracer_build(raytracer* tracer);
