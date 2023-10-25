@@ -38,7 +38,7 @@ jobs:
           mkdir -p /Users/runner/bin/
           which gcc
           ln -s `which gcc-10` /Users/runner/bin/gcc
-          ln -s `which g++-10` /Users/runner/bin/gcc
+          ln -s `which g++-10` /Users/runner/bin/g++
           ln -s `which gcc-10` /Users/runner/bin/cc
       - name: Install dependencies (Windows only)
         if: ${{ runner.os == 'Windows' }}
@@ -88,8 +88,10 @@ jobs:
           cd src
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             make mex
+          elif [[ "$RUNNER_OS" == "macOS" ]]; then
+            make mex CC=clang CXX=clang++ MEXLINKOPT="-static-libstdc++ -static-libgcc -fopenmp" EXTRALIB="-v -lomp"
           else
-            make mex MEXLINKOPT="-static-libstdc++ -static-libgcc -fopenmp"
+            make mex MEXLINKOPT="-static-libstdc++ -static-libgcc -fopenmp" EXTRALIB="-v"
           fi
       - name: Build binary
         run: |
