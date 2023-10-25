@@ -13,7 +13,7 @@
 # and linking
 ########################################################
 
-ROOTDIR ?= .
+ROOTDIR ?= ..
 MMCDIR  ?= $(ROOTDIR)
 
 MMCSRC :=$(MMCDIR)/src
@@ -21,7 +21,7 @@ MMCSRC :=$(MMCDIR)/src
 CXX        := g++
 AR         := $(CC)
 CUDACC     :=nvcc
-BIN        := bin
+BIN        := $(MMCDIR)/bin
 BUILT      := built
 BINDIR     := $(BIN)
 OBJDIR 	   := $(BUILT)
@@ -30,8 +30,8 @@ INCLUDEDIR := $(MMCDIR)/src -I$(MMCDIR)/src/zmat/easylzma -I$(MMCDIR)/src/ubj
 AROUTPUT   += -o
 MAKE       ?= make
 
-ZMATLIB    :=libzmat.a
-USERARFLAGS?=$(ZMATLIB) -lz
+ZMATLIB    :=lib/libzmat.a
+USERARFLAGS?=$(ZMATLIB)
 
 LIBOPENCLDIR ?= /usr/local/cuda/lib64
 LIBOPENCL  ?=-lOpenCL
@@ -46,14 +46,17 @@ CUDA_STATIC=--cudart static -Xcompiler "-static-libgcc -static-libstdc++"
 ECHO	   := echo
 MKDIR      := mkdir
 
+MEXLINKLIBS=-L"\$$MATLABROOT/extern/lib/\$$ARCH" -L"\$$MATLABROOT/bin/\$$ARCH" -lmx -lmex $(ZMATLIB)
+
 ARCH = $(shell uname -m)
 ifeq ($(findstring x86_64,$(ARCH)), x86_64)
      CCFLAGS+=-m64
 endif
+ISCLANG = $(shell $(CC) --version | grep clang)
 
 MEXLINKOPT +=$(OPENMPLIB)
 MKMEX      :=mex
-MKMEXOPT    =CC='$(CC)' CXX='$(CXX)' CXXLIBS='$$CXXLIBS $(LIBOPENCL) $(LIBCUDART)' CXXFLAGS='$(CCFLAGS) $(USERCCFLAGS)' LDFLAGS='-L$$TMW_ROOT$$MATLABROOT/sys/os/$$ARCH $$LDFLAGS $(MEXLINKOPT)' $(FASTMATH) -cxx -outdir $(BINDIR)
+MKMEXOPT    =CC='$(CC)' CXX='$(CXX)' LINKLIBS="$(MEXLINKLIBS) $(MEXLINKOPT)" COMPFLAGS='' DEFINES='' CXXLIBS='$$CXXLIBS $(MEXLINKOPT) $(LIBOPENCL) $(LIBCUDART)' CXXFLAGS='$(CCFLAGS) $(USERCCFLAGS)' $(FASTMATH) -cxx -outdir $(BINDIR)
 MKOCT      :=mkoctfile -v
 
 DLLFLAG=-fPIC
@@ -68,6 +71,7 @@ ifeq ($(findstring MINGW64,$(PLATFORM)), MINGW64)
     EXTRALIB   +=-static
     CCFLAGS    +=-D__USE_MINGW_ANSI_STDIO=1
     DLLFLAG    =
+    MEXLINKLIBS="\$$LINKLIBS"
 else ifeq ($(findstring MSYS,$(PLATFORM)), MSYS)
     MKMEX      :=cmd //c mex.bat
     INCLUDEDIRS+=-I"./mingw64/include"
@@ -76,6 +80,7 @@ else ifeq ($(findstring MSYS,$(PLATFORM)), MSYS)
     EXTRALIB   +=-static
     CCFLAGS    +=-D__USE_MINGW_ANSI_STDIO=1
     DLLFLAG    =
+    MEXLINKLIBS="\$$LINKLIBS"
 else ifeq ($(findstring CYGWIN,$(PLATFORM)), CYGWIN)
     MKMEX      :=cmd /c mex.bat
     MKMEXOPT    =-f mexopts_msys2_gcc.xml COMPFLAGS='$$COMPFLAGS $(CCFLAGS) $(USERCCFLAGS)' LDFLAGS='$$LDFLAGS -static $(OPENMPLIB) $(LIBOPENCL) $(MEXLINKOPT)' $(FASTMATH) -outdir ../mmclab
@@ -84,11 +89,18 @@ else ifeq ($(findstring CYGWIN,$(PLATFORM)), CYGWIN)
     EXTRALIB   +=-static
     CCFLAGS    +=-D__USE_MINGW_ANSI_STDIO=1
     DLLFLAG     =
+    MEXLINKLIBS="\$$LINKLIBS"
 else ifeq ($(findstring Darwin,$(PLATFORM)), Darwin)
     INCLUDEDIRS=-I/System/Library/Frameworks/OpenCL.framework/Headers
     LIBOPENCL=-framework OpenCL
     LIBOPENCLDIR=/System/Library/Frameworks/OpenCL.framework/Versions/A
-    OPENMPLIB=-static-libgcc /usr/local/lib/libgomp.a
+    ifeq ($(ISCLANG),)
+        OPENMPLIB=-static-libgcc -static-libstdc++ /usr/local/lib/libgomp.a
+        OPENMP=-fopenmp
+    else
+        OPENMPLIB=/usr/local/lib/libomp.a
+        OPENMP=-Xclang -fopenmp
+    endif
     CUDA_STATIC=--cudart static
 endif
 
@@ -97,7 +109,11 @@ ifeq ($(BACKEND),ocelot)
   CUCCOPT=-D__STRICT_ANSI__ -g #--maxrregcount 32
 else ifeq ($(BACKEND),cudastatic)
   ifeq ($(findstring Darwin,$(PLATFORM)), Darwin)
-      CUDART=-lcudadevrt -lcudart_static -ldl -static-libgcc -static-libstdc++
+      ifeq ($(ISCLANG),)
+          CUDART=-lcudadevrt -lcudart_static -ldl -static-libgcc -static-libstdc++
+      else
+          CUDART=-lcudadevrt -lcudart_static -ldl /usr/local/lib/libomp.a
+      endif
   else
       CUDART=-lcudadevrt -lcudart_static -ldl -lrt -static-libgcc -static-libstdc++
   endif
@@ -193,9 +209,10 @@ ifeq ($(TARGETSUFFIX),.a)
 	OPENMPLIB  :=
 endif
 
-cuda: sse
+cuda: ssemath
 cudamex: mex
 cudaoct: oct
+trinity: cuda
 
 all release sse ssemath prof omp mex oct mexomp octomp web debug cuda: $(SUBDIRS) $(BINDIR)/$(BINARY)
 
@@ -282,4 +299,4 @@ pretty:
 
 .PHONY: regression clean arch makedirs dep $(SUBDIRS)
 
-.DEFAULT_GOAL := sse
+.DEFAULT_GOAL := ssemath
