@@ -35,6 +35,11 @@ jobs:
         if: ${{ runner.os == 'macOS' }}
         run: |
           sudo ln -s /usr/local/lib/gcc/10/libgomp.a /usr/local/lib/libgomp.a
+          mkdir -p /Users/runner/bin/
+          which gcc
+          ln -s `which gcc-10` /Users/runner/bin/gcc
+          ln -s `which g++-10` /Users/runner/bin/gcc
+          ln -s `which gcc-10` /Users/runner/bin/cc
       - name: Install dependencies (Windows only)
         if: ${{ runner.os == 'Windows' }}
         shell: pwsh
@@ -83,8 +88,6 @@ jobs:
           cd src
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             make mex
-          elif [[ "$RUNNER_OS" == "macOS" ]]; then
-            make mex CC=gcc-10 CXX=g++-10 MEXLINKOPT="-static-libstdc++ -static-libgcc -fopenmp"
           else
             make mex MEXLINKOPT="-static-libstdc++ -static-libgcc -fopenmp"
           fi
