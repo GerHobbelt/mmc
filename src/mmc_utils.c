@@ -2158,6 +2158,21 @@ int mcx_parsedebugopt(char* debugopt) {
     return debuglevel;
 }
 
+
+/**
+ * @brief Flush command line output
+ *
+ * @param[in] out: the stream to be flushed
+ */
+
+void mcx_fflush(FILE* out) {
+#ifdef MCX_CONTAINER
+    mcx_matlab_flush();
+#else
+    fflush(out);
+#endif
+}
+
 /**
  * @brief Print a progress bar
  *
@@ -2210,11 +2225,8 @@ void mcx_progressbar(float percent, void* cfg) {
         }
 
         MMC_FPRINTF(stdout, "] %3d%%" S_RESET, (int)(percent * 100));
-#ifdef MCX_CONTAINER
-        mcx_matlab_flush();
-#else
-        fflush(stdout);
-#endif
+
+        mcx_fflush(stdout);
     }
 }
 
@@ -2909,7 +2921,7 @@ void mcx_savedetphoton(float* ppath, void* seeds, int count, int doappend, mccon
  */
 
 void mcx_version(mcconfig* cfg) {
-    MMC_ERROR(MMC_INFO, "MMC $Rev::      $v2022.10");
+    MMC_ERROR(MMC_INFO, "MMC $Rev::      $v2023.01");
 }
 
 /**
@@ -2930,7 +2942,7 @@ void mcx_printheader(mcconfig* cfg) {
 #                                                                             #\n\
 #                Research funded by NIH/NIGMS grant R01-GM114365              #\n\
 ###############################################################################\n\
-$Rev::      $v2022.10$Date::                       $ by $Author::             $\n\
+$Rev::      $v2023.01$Date::                       $ by $Author::             $\n\
 ###############################################################################\n"S_RESET);
 }
 
