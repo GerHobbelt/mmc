@@ -50,6 +50,10 @@
 #include "zmat/zmatlib.h"
 #include "ubj/ubj.h"
 
+#if defined(_WIN32) && defined(USE_OS_TIMER) && !defined(MCX_CONTAINER)
+    #include "mmc_tictoc.h"
+#endif
+
 #ifdef MCX_EMBED_CL
     #include "mmc_core.clh"
 #endif
@@ -414,6 +418,9 @@ void mcx_cleargpuinfo(GPUInfo** gpuinfo) {
         *gpuinfo = NULL;
     }
 }
+
+
+#ifndef MCX_CONTAINER
 
 /**
  * @brief Save volumetric output (fluence etc) to an Nifty format binary file
@@ -1056,6 +1063,8 @@ void mcx_savejdet(float* ppath, void* seeds, uint count, int doappend, mcconfig*
     }
 }
 
+#endif
+
 /**
  * @brief Print a message to the console or a log file
  *
@@ -1125,6 +1134,8 @@ void mcx_assert(const int ret, const char* file, const int linenum) {
         mcx_error(ret, "input error", file, linenum);
     }
 }
+
+#ifndef MCX_CONTAINER
 
 /**
  * @brief Read simulation settings from a configuration file (.inp or .json)
@@ -1947,6 +1958,7 @@ void mcx_savejdata(char* filename, mcconfig* cfg) {
     }
 }
 
+#endif
 
 /**
  * @brief Convert a column-major (MATLAB/FORTRAN) array to a row-major (C/C++) array
@@ -2011,6 +2023,7 @@ void  mcx_convertcol2row4d(unsigned int** vol, uint4* dim) {
     *vol = newvol;
 }
 
+#ifndef MCX_CONTAINER
 
 
 /**
@@ -2176,6 +2189,7 @@ int  mcx_jdataencode(void* vol, int ndim, uint* dims, char* type, int byte, int 
     return ret;
 }
 
+#endif
 
 /**
  * @brief Parse the debug flag in the letter format
@@ -2276,6 +2290,8 @@ void mcx_progressbar(float percent) {
     }
 }
 
+#ifndef MCX_CONTAINER
+
 /**
  * @brief Function to read a single parameter value followed by a command line option
  *
@@ -2344,6 +2360,7 @@ int mcx_readarg(int argc, char* argv[], int id, void* output, const char* type) 
     return id + 1;
 }
 
+#endif
 
 /**
  * @brief Test if a long command line option is supported
@@ -2538,6 +2555,8 @@ void mcx_prep(mcconfig* cfg) {
     }
 }
 
+#ifndef MCX_CONTAINER
+
 /**
  * @brief Main function to read user command line options
  *
@@ -2553,6 +2572,10 @@ void mcx_parsecmd(int argc, char* argv[], mcconfig* cfg) {
     char filename[MAX_PATH_LENGTH] = {0}, *jsoninput = NULL;
     char logfile[MAX_PATH_LENGTH] = {0};
     float np = 0.f;
+
+#if defined(_WIN32) && defined(USE_OS_TIMER) && !defined(MCX_CONTAINER)
+    EnableVTMode();
+#endif
 
     if (argc <= 1) {
         mcx_usage(argv[0], cfg);
@@ -2850,7 +2873,7 @@ void mcx_parsecmd(int argc, char* argv[], mcconfig* cfg) {
                         } else {
                             MMC_FPRINTF(cfg->flog, "Built-in benchmarks:\n");
 
-                            for (i = 0; i < sizeof(benchname) / sizeof(char*) -1; i++) {
+                            for (i = 0; i < sizeof(benchname) / sizeof(char*) - 1; i++) {
                                 MMC_FPRINTF(cfg->flog, "\t%s\n", benchname[i]);
                             }
 
@@ -2960,6 +2983,9 @@ void mcx_savedetphoton(float* ppath, void* seeds, int count, int doappend, mccon
     fwrite(ppath, sizeof(float), count * cfg->his.colcount, fp);
     fclose(fp);
 }
+
+#endif
+
 /**
  * @brief Print MCX software version
  *

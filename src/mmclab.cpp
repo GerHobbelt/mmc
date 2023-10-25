@@ -950,7 +950,7 @@ void mmc_set_field(const mxArray* root, const mxArray* item, int idx, mcconfig* 
             cfg->workload[i] = val[i];
         }
 
-        printf("mmc.workload=<<%zu>>;\n", (size_t)arraydim[0]*arraydim[1]);
+        printf("mmc.workload=<<%.0f>>;\n", (double)arraydim[0]*arraydim[1]);
     } else if (strcmp(name, "isreoriented") == 0) {
         /*internal flag, don't need to do anything*/
     } else {
@@ -1132,3 +1132,14 @@ extern "C" void mcx_matlab_flush() {
     mexEvalString("fflush(stdout);");
 #endif
 }
+
+#if defined(__APPLE__)
+/**
+ * @brief Phantom main function to let macos to build mmclab
+ */
+
+int main(void) {
+    return 1;
+}
+
+#endif

@@ -451,7 +451,7 @@ void mmc_run_simulation(mcconfig* cfg, tetmesh* mesh, raytracer* tracer, GPUInfo
         Pseed[j] = rand();
     }
 
-    CUDA_ASSERT(cudaMalloc((void**)&gseed, sizeof(uint) * gpu[gpuid].autothread*
+    CUDA_ASSERT(cudaMalloc((void**)&gseed, sizeof(uint) * gpu[gpuid].autothread *
                            RAND_SEED_WORD_LEN));
     CUDA_ASSERT(cudaMemcpy(
                     gseed, Pseed, sizeof(uint) * gpu[gpuid].autothread * RAND_SEED_WORD_LEN,
@@ -492,10 +492,10 @@ void mmc_run_simulation(mcconfig* cfg, tetmesh* mesh, raytracer* tracer, GPUInfo
                                cudaMemcpyHostToDevice));
     } else if (cfg->srctype == MCX_SRC_PATTERN3D) {
         CUDA_ASSERT(cudaMalloc((void**)&gsrcpattern,
-                               sizeof(float) * (int)(cfg->srcparam1.x * cfg->srcparam1.y*
+                               sizeof(float) * (int)(cfg->srcparam1.x * cfg->srcparam1.y *
                                        cfg->srcparam1.z)));
         CUDA_ASSERT(cudaMemcpy(gsrcpattern, cfg->srcpattern,
-                               sizeof(float) * (int)(cfg->srcparam1.x * cfg->srcparam1.y*
+                               sizeof(float) * (int)(cfg->srcparam1.x * cfg->srcparam1.y *
                                        cfg->srcparam1.z),
                                cudaMemcpyHostToDevice));
     } else {
@@ -655,7 +655,7 @@ void mmc_run_simulation(mcconfig* cfg, tetmesh* mesh, raytracer* tracer, GPUInfo
                             cfg->exportdetected, (cfg->detectedcount + detected) *
                             hostdetreclen * sizeof(float));
                         memcpy(cfg->exportdetected + cfg->detectedcount * (hostdetreclen),
-                               Pdet, detected * (hostdetreclen) * sizeof(float));
+                        Pdet, detected * (hostdetreclen) * sizeof(float));
 
                         if (cfg->issaveseed) {
                             cfg->exportseed = (unsigned char*)realloc(cfg->exportseed, (cfg->detectedcount + detected) * (sizeof(RandType) * RAND_BUF_LEN));
@@ -722,7 +722,7 @@ void mmc_run_simulation(mcconfig* cfg, tetmesh* mesh, raytracer* tracer, GPUInfo
                 }
 
                 CUDA_ASSERT(cudaMemcpy(gseed, Pseed,
-                                       sizeof(uint) * gpu[gpuid].autothread*
+                                       sizeof(uint) * gpu[gpuid].autothread *
                                        RAND_SEED_WORD_LEN,
                                        cudaMemcpyHostToDevice));
                 free(Pseed);
@@ -769,6 +769,8 @@ void mmc_run_simulation(mcconfig* cfg, tetmesh* mesh, raytracer* tracer, GPUInfo
             mesh_normalize(mesh, cfg, cfg->energyabs, cfg->energytot, 0);
         }
 
+#ifndef MCX_CONTAINER
+
         if (cfg->issave2pt && cfg->parentid == mpStandalone) {
             MMC_FPRINTF(cfg->flog, "saving data to file ...\t");
             mesh_saveweight(mesh, cfg, 0);
@@ -790,6 +792,8 @@ void mmc_run_simulation(mcconfig* cfg, tetmesh* mesh, raytracer* tracer, GPUInfo
             MMC_FPRINTF(cfg->flog, "saving surface diffuse reflectance ...");
             mesh_saveweight(mesh, cfg, 1);
         }
+
+#endif
 
         // total energy here equals total simulated photons+unfinished photons for
         // all threads

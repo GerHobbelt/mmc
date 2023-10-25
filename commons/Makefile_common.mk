@@ -31,7 +31,6 @@ AROUTPUT   += -o
 MAKE       ?= make
 
 ZMATLIB    :=lib/libzmat.a
-USERARFLAGS?=$(ZMATLIB)
 
 LIBOPENCLDIR ?= /usr/local/cuda/lib64
 LIBOPENCL  ?=-lOpenCL
@@ -45,6 +44,14 @@ CUDA_STATIC=--cudart static -Xcompiler "-static-libgcc -static-libstdc++"
 
 ECHO	   := echo
 MKDIR      := mkdir
+
+ifneq (,$(filter $(MAKECMDGOALS),mex oct mexomp octomp cudamex cudaoct))
+    ZMATLIB=
+else
+    FILES+=mmc cjson/cJSON ubj/ubjw
+endif
+
+USERARFLAGS?=$(ZMATLIB)
 
 MEXLINKLIBS=-L"\$$MATLABROOT/extern/lib/\$$ARCH" -L"\$$MATLABROOT/bin/\$$ARCH" -lmx -lmex $(ZMATLIB)
 
@@ -95,7 +102,7 @@ else ifeq ($(findstring Darwin,$(PLATFORM)), Darwin)
     LIBOPENCL=-framework OpenCL
     LIBOPENCLDIR=/System/Library/Frameworks/OpenCL.framework/Versions/A
     ifeq ($(ISCLANG),)
-        OPENMPLIB=-static-libgcc -static-libstdc++ /usr/local/lib/libgomp.a
+        OPENMPLIB=-static-libgcc -static-libstdc++ $(shell $(CC) --print-file-name=libgomp.a)
         OPENMP=-fopenmp
     else
         OPENMPLIB=/usr/local/lib/libomp.a
@@ -183,6 +190,7 @@ web: EXTRALIB=-s SIMD=1 -s WASM=1 -s EXTRA_EXPORTED_RUNTIME_METHODS='["cwrap"]' 
 
 mex oct mexomp octomp:   EXTRALIB=
 mex oct mexomp octomp:   CCFLAGS+=$(DLLFLAG) -DMCX_CONTAINER
+mex oct mexomp octomp:   CUCCOPT+=-DMCX_CONTAINER
 mex oct mexomp octomp:   CPPFLAGS+=-g $(DLLFLAG) -DMCX_CONTAINER
 mex oct mexomp octomp:   BINDIR=../mmclab
 mex mexomp:     AR=$(MKMEX)
