@@ -44,9 +44,9 @@ jobs:
             base-devel
             mingw-w64-x86_64-gcc-libs
             mingw-w64-x86_64-zlib
-      - name: Search library paths
+      - name: List msys libraries
         run: |
-          Get-Childitem –Path C:\ -Include libgomp* libz.* libpthread.* -File -Recurse -ErrorAction SilentlyContinue
+            find c:/msys64/mingw64/lib/ -name "lib*.a"
       - name: Update RCS keywords
         run: |
           printf '\n[filter "rcs-keywords"]\n\tclean  = .git_filters/rcs-keywords.clean\n\tsmudge = .git_filters/rcs-keywords.smudge %f\n' >> .git/config
