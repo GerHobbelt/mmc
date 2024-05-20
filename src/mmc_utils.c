@@ -2,7 +2,7 @@
 **  \mainpage Mesh-based Monte Carlo (MMC) - a 3D photon simulator
 **
 **  \author Qianqian Fang <q.fang at neu.edu>
-**  \copyright Qianqian Fang, 2010-2023
+**  \copyright Qianqian Fang, 2010-2024
 **
 **  \section sref Reference:
 **  \li \c (\b Fang2010) Qianqian Fang, <a href="http://www.opticsinfobase.org/abstract.cfm?uri=boe-1-1-165">
@@ -136,7 +136,7 @@ extern char pathsep;
  * P: show progress bar
  */
 
-const char debugflag[] = {'M', 'C', 'B', 'W', 'D', 'I', 'O', 'X', 'A', 'T', 'R', 'P', 'E', '\0'};
+const char debugflag[] = {'M', 'C', 'B', 'W', 'D', 'I', 'O', 'X', 'A', 'T', 'R', 'P', 'E', 'S', '\0'};
 
 /**
  * Selecting mesh-based ray-tracing algorithm:
@@ -328,6 +328,9 @@ void mcx_initcfg(mcconfig* cfg) {
     cfg->autopilot = 1;
     cfg->nbuffer = 0;
     cfg->gpuid = 0;
+    cfg->maxjumpdebug = 10000000;
+    cfg->exportdebugdata = NULL;
+    cfg->debugdatalen = 0;
 
 #ifdef MCX_EMBED_CL
     cfg->clsource = (char*)mmc_core_cl;
@@ -386,6 +389,10 @@ void mcx_clearcfg(mcconfig* cfg) {
 
     if (cfg->exportdetected) {
         free(cfg->exportdetected);
+    }
+
+    if (cfg->exportdebugdata) {
+        free(cfg->exportdebugdata);
     }
 
     if (cfg->flog && cfg->flog != stdout && cfg->flog != stderr) {
@@ -2881,6 +2888,8 @@ void mcx_parsecmd(int argc, char* argv[], mcconfig* cfg) {
                         }
                     } else if (strcmp(argv[i] + 2, "debugphoton") == 0) {
                         i = mcx_readarg(argc, argv, i, &(cfg->debugphoton), "int");
+                    } else if (strcmp(argv[i] + 2, "maxjumpdebug") == 0) {
+                        i = mcx_readarg(argc, argv, i, &(cfg->maxjumpdebug), "int");
                     } else if (strcmp(argv[i] + 2, "buffer") == 0) {
                         i = mcx_readarg(argc, argv, i, &(cfg->nbuffer), "int");
                     } else if (strcmp(argv[i] + 2, "gridsize") == 0) {
@@ -3006,8 +3015,8 @@ void mcx_printheader(mcconfig* cfg) {
     MMC_FPRINTF(cfg->flog, S_YELLOW "\
 ###############################################################################\n\
 #                     Mesh-based Monte Carlo (MMC) - OpenCL                   #\n\
-#          Copyright (c) 2010-2023 Qianqian Fang <q.fang at neu.edu>          #\n\
-#" S_BLUE "              https://mcx.space/#mmc  &  https://neurojson.org/              " S_YELLOW "#\n\
+#          Copyright (c) 2010-2024 Qianqian Fang <q.fang at neu.edu>          #\n\
+#" S_BLUE "              https://mcx.space/#mmc  &  https://neurojson.io/               " S_YELLOW "#\n\
 #                                                                             #\n\
 #Computational Optics & Translational Imaging (COTI) Lab  [http://fanglab.org]#\n\
 #   Department of Bioengineering, Northeastern University, Boston, MA, USA    #\n\
@@ -3015,10 +3024,12 @@ void mcx_printheader(mcconfig* cfg) {
 #    The MCX Project is funded by the NIH/NIGMS under grant R01-GM114365      #\n\
 ###############################################################################\n\
 #  Open-source codes and reusable scientific data are essential for research, #\n\
-# MCX proudly developed human-readable JSON-based data formats for easy reuse,#\n\
-#  Please consider using JSON (" S_BLUE "https://neurojson.org/" S_YELLOW ") for your research data #\n\
+# MCX proudly developed human-readable JSON-based data formats for easy reuse.#\n\
+#                                                                             #\n\
+#Please visit our free scientific data sharing portal at " S_BLUE "https://neurojson.io/" S_YELLOW "#\n\
+# and consider sharing your public datasets in standardized JSON/JData format #\n\
 ###############################################################################\n\
-$Rev::      $ " S_GREEN MMC_VERSION S_YELLOW "  $Date::                       $ by $Author::             $\n\
+$Rev::      $" S_GREEN MMC_VERSION S_YELLOW " $Date::                       $ by $Author::             $\n\
 ###############################################################################\n"S_RESET);
 }
 
@@ -3144,6 +3155,7 @@ where possible parameters include (the first item in [] is the default value)\n\
                             1024 R  debugging reflection\n\
                             2048 P  show progress bar\n\
                             4096 E  exit photon info\n\
+                            8192 S  return photon trajectories\n\
       combine multiple items by using a string, or add selected numbers together\n\
  --debugphoton [-1|int]        to print the debug info specified by -D only for\n\
                                a single photon, followed by its index (start 0)\n\
@@ -3151,6 +3163,9 @@ where possible parameters include (the first item in [] is the default value)\n\
 == Additional options ==\n"S_RESET"\
  --momentum     [0|1]          1 to save photon momentum transfer,0 not to save\n\
  --gridsize     [1|float]      if -M G is used, this sets the grid size in mm\n\
+ --maxjumpdebug [10000000|int] when trajectory is requested (i.e. -D S),\n\
+                               use this parameter to set the maximum positions\n\
+                               stored (default: 1e7)\n\
 \n"S_BOLD S_CYAN"\
 == Example ==\n"S_RESET"\
        %s -n 1000000 -f input.json -s test -b 0 -D TP -G -1\n", exename,

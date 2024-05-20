@@ -2,7 +2,7 @@
 **  \mainpage Mesh-based Monte Carlo (MMC) - a 3D photon simulator
 **
 **  \author Qianqian Fang <q.fang at neu.edu>
-**  \copyright Qianqian Fang, 2010-2023
+**  \copyright Qianqian Fang, 2010-2024
 **
 **  \section sref Reference:
 **  \li \c (\b Fang2010) Qianqian Fang, <a href="http://www.opticsinfobase.org/abstract.cfm?uri=boe-1-1-165">
@@ -39,6 +39,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include "mmc_raytrace.h"
+#include "mmc_const.h"
 
 /**<  Macro to enable SSE4 based ray-tracers */
 
@@ -975,39 +976,40 @@ float havel_raytet(ray* r, raytracer* tracer, mcconfig* cfg, visitor* visit) {
 
 
 /**
- * \brief Compute distances to edge (cylindrical) ROIs in the element
+ * \brief Compute distances to edge (infinite cylindrical) ROIs in the element
  *
- * Commpute the distance between P0 and the labeled edge
- * and the distance between P1 and the labeled edge.
+ * Commpute the distance between P0 (ray-start) and the labeled edge
+ * and the distance between P1 (ray-end) and the labeled edge.
  * P0 is the entry point and P1 is the exit point
  */
 void compute_distances_to_edge(ray* r, raytracer* tracer, int* ee, int edgeid, float d2d[2], float3 p2d[2], int* hitstatus) {
     float3 u, OP;
-    float r2;
+    float r2, d1;
 
-    p2d[1] = tracer->mesh->node[ee[e2n[edgeid][0]] - 1];
-    p2d[0] = tracer->mesh->node[ee[e2n[edgeid][1]] - 1];
+    p2d[1] = tracer->mesh->node[ee[e2n[edgeid][0]] - 1]; // end id of the edge, E1
+    p2d[0] = tracer->mesh->node[ee[e2n[edgeid][1]] - 1]; // start id of the edge, E0
 
-    vec_diff(p2d + 1, p2d, &u);
-    r2 = dist(p2d + 1, p2d); // get coordinates and compute distance between two nodes
+    vec_diff(p2d + 1, p2d, &u); // vector of the edge u = <E0 -> E1>
+    r2 = dist(p2d + 1, p2d); // get coordinates and compute edge length between E0-E1
     r2 = 1.0f / r2;
-    vec_mult(&u, r2, &u); // normalized vector of the edge
+    vec_mult(&u, r2, &u); // normalized vector of the edge, u is now unitary
 
-    vec_diff(p2d + 1, &r->p0, &OP);
-    r2 = vec_dot(&OP, &u);
-    vec_mult(&u, r2, p2d);
-    vec_diff(p2d, &OP, p2d);    // PP0: P0 projection on plane
-    d2d[0] = vec_dot(p2d, p2d);
+    vec_diff(p2d + 1, &r->p0, &OP); // ray-start to edge-end, OP = <P0 -> E1>
+    d1 = vec_dot(&OP, &u);      // projection of OP to u
+    vec_mult(&u, d1, p2d);      // p2d now stores the vector starts with edge-start, ends with the orthogonal projection of vector OP=<P0->E1>
+    vec_diff(p2d, &OP, p2d);    // PP0: P0 projection on plane, computed by OP - p2d
+    d2d[0] = vec_dot(p2d, p2d); // ray-start (P0) distance to the edge squared
 
     vec_mult(&r->vec, r->Lmove, &OP);
-    vec_add(&r->p0, &OP, &OP);      // P1
-    vec_diff(p2d + 1, &OP, &OP);
-    r2 = vec_dot(&OP, &u);
-    vec_mult(&u, r2, p2d + 1);
+    vec_add(&r->p0, &OP, &OP);      // P1, ray-end
+    vec_diff(p2d + 1, &OP, &OP);    // OP = <P1 -> E1> vector from ray-end to edge-end
+    d1 = vec_dot(&OP, &u);
+    vec_mult(&u, d1, p2d + 1);
     vec_diff(p2d + 1, &OP, p2d + 1); // PP1: P1 projection on plane
-    d2d[1] = vec_dot(p2d + 1, p2d + 1);
+    d2d[1] = vec_dot(p2d + 1, p2d + 1); // ray-end (P1) distance to the edge squared
 
-    r2 = r->roisize[edgeid] * r->roisize[edgeid];
+    r2 = r->roisize[edgeid] * r->roisize[edgeid]; // squared radius of the edge-roi
+
     *hitstatus = htNone;
 
     if (d2d[0] > r2 + EPS2 && d2d[1] < r2 - EPS2) {
@@ -1187,7 +1189,9 @@ void traceroi(ray* r, raytracer* tracer, int roitype, int doinit) {
     int eid = r->eid - 1;
     int* ee = (int*)(tracer->mesh->elem + eid * tracer->mesh->elemlen);
 
-    if (roitype == 1) { /** edge and node immc - edge also depends on node */
+    if (roitype == 1) { /** edge and node immc - edge also depends on node, only test intersection with an infinite cylinder */
+        int neweid = -1;
+        int* newee;
         int i;
         float minratio = 1.f;
         int hitstatus = htNone, firsthit = htNone, firstinout = htNone;
@@ -1197,48 +1201,63 @@ void traceroi(ray* r, raytracer* tracer, int roitype, int doinit) {
             float distdata[2];
             float3 projdata[2];
 
-            for (i = 0; i < 6; i++) { /** loop over each edge in current element */
-                if (r->roisize[i] > 0.f) {
-                    /** decide if photon is in the roi or not */
-                    compute_distances_to_edge(r, tracer, ee, i, distdata, projdata, &hitstatus);
+            if (r->roisize[0] != 0.f) {
+                // test if this is a reference element, indicated by a negative radius
+                if (r->roisize[0] < -6.f) {
+                    neweid = (int)(-r->roisize[0]) - 6;
+                    r->refeid = neweid;
+                    newee = (int*)(tracer->mesh->elem + (neweid - 1) * tracer->mesh->elemlen);
+                    r->roisize = (float*)(tracer->mesh->edgeroi + (neweid - 1) * 6); // update r->roisize array to the referenced element
+                }
 
-                    /**
-                       hitstatus has 4 possible outputs:
-                       htInOut: photon path intersects with cylinder, moving from in to out
-                       htOutIn: photon path intersects with cylinder, moving from out to in
-                       htNoHitIn: both ends of photon path are inside cylinder, no intersection
-                       htNoHitOut: both ends of photon path are outside cylinder, no intersection
-                       htNone: unexpected, should never happen
-                     */
-                    if (doinit) {
-                        r->inroi |= (hitstatus == htInOut || hitstatus == htNoHitIn);
-                    } else {
-                        if (hitstatus == htInOut || hitstatus == htOutIn) { /** if intersection is found */
-                            /** calculate the first intersection distance normalied by path seg length */
-                            float lratio = ray_cylinder_intersect(r, i, distdata, projdata, hitstatus);
+                for (i = 0; i < 6; i++) { /** loop over each edge in current element, find the closest hit */
+                    if (r->roisize[i] > 0.f) {
+                        /** decide if photon is in the roi or not */
+                        if (neweid < 0) {
+                            compute_distances_to_edge(r, tracer, ee, i, distdata, projdata, &hitstatus);
+                        } else {
+                            compute_distances_to_edge(r, tracer, newee, i, distdata, projdata, &hitstatus);
+                        }
 
-                            if (lratio < minratio) {
-                                minratio = lratio;
-                                firsthit = hitstatus;
-                                r->roiidx = i;
+
+                        /**
+                         *  hitstatus has 4 possible outputs:
+                         *  htInOut: photon path intersects with cylinder, moving from in to out
+                         *  htOutIn: photon path intersects with cylinder, moving from out to in
+                         *  htNoHitIn: both ends of photon path are inside cylinder, no intersection
+                         *  htNoHitOut: both ends of photon path are outside cylinder, no intersection
+                         *  htNone: unexpected, should never happen
+                         */
+                        if (doinit) {
+                            r->inroi |= (hitstatus == htInOut || hitstatus == htNoHitIn); /** start position is in ROI - initialize state */
+                        } else {
+                            if (hitstatus == htInOut || hitstatus == htOutIn) { /** if intersection is found */
+                                /** calculate the first intersection distance normalied by path seg length */
+                                float lratio = ray_cylinder_intersect(r, i, distdata, projdata, hitstatus);
+
+                                if (lratio < minratio) { /** find the closest hit */
+                                    minratio = lratio;
+                                    firsthit = hitstatus; /** closest hit status  */
+                                    r->roiidx = i;
+                                }
+                            } else if (hitstatus == htNoHitIn || hitstatus == htNoHitOut) {
+                                firstinout = ((firstinout == htNone) ? hitstatus : (hitstatus == htNoHitIn ? hitstatus : firstinout));
                             }
-                        } else if (hitstatus == htNoHitIn || hitstatus == htNoHitOut) {
-                            firstinout = ((firstinout == htNone) ? hitstatus : (hitstatus == htNoHitIn ? hitstatus : firstinout));
                         }
                     }
                 }
-            }
 
-            if (minratio < 1.f) {
-                r->Lmove *= minratio;
-            }
+                if (minratio < 1.f) {
+                    r->Lmove *= minratio;
+                }
 
-            if (!doinit) {
-                r->inroi = (firsthit != htNone ? (firsthit == htOutIn) : (firstinout != htNone ? (firstinout == htNoHitIn) : r->inroi ));
-                r->inroi = (firsthit == htNone && firstinout == htNone) ? 0 : r->inroi;
-            }
+                if (!doinit) {
+                    r->inroi = (firsthit != htNone ? (firsthit == htOutIn) : (firstinout != htNone ? (firstinout == htNoHitIn) : r->inroi ));
+                    r->inroi = (firsthit == htNone && firstinout == htNone) ? 0 : r->inroi;
+                }
 
-            r->roitype = (firsthit == htInOut || firsthit == htOutIn) ? rtEdge : rtNone;
+                r->roitype = (firsthit == htInOut || firsthit == htOutIn) ? rtEdge : rtNone;
+            }
         }
 
         if (firsthit == htNone && firstinout != htNoHitIn && tracer->mesh->noderoi) {
@@ -1698,6 +1717,33 @@ float branchless_badouel_raytet(ray* r, raytracer* tracer, mcconfig* cfg, visito
 #endif
 
 /**
+ * @brief Saving photon trajectory data for debugging purposes
+ * @param[in] p: the position/weight of the current photon packet
+ * @param[in] id: the global index of the photon
+ * @param[in] gdebugdata: pointer to the global-memory buffer to store the trajectory info
+ */
+
+void savedebugdata(ray* r, unsigned int id, mcconfig* cfg) {
+    unsigned int pos;
+    float* gdebugdata = cfg->exportdebugdata;
+
+    #pragma omp critical
+    {
+        pos = cfg->debugdatalen++;
+    }
+
+    if (pos < cfg->maxjumpdebug) {
+        pos *= MCX_DEBUG_REC_LEN;
+        ((unsigned int*)gdebugdata)[pos++] = id;
+        gdebugdata[pos++] = r->p0.x;
+        gdebugdata[pos++] = r->p0.y;
+        gdebugdata[pos++] = r->p0.z;
+        gdebugdata[pos++] = r->weight;
+        ((unsigned int*)gdebugdata)[pos++] = r->eid;
+    }
+}
+
+/**
  * @brief The core Monte Carlo function simulating a single photon (!!!Important!!!)
  *
  * This is the core Monte Carlo simulation function. It simulates the life-time
@@ -1745,6 +1791,10 @@ void onephoton(size_t id, raytracer* tracer, tetmesh* mesh, mcconfig* cfg,
     launchphoton(cfg, &r, mesh, ran, ran0);
     r.partialpath[visit->reclen - 2] = r.weight; /*last record in partialpath is the initial photon weight*/
 
+    if (cfg->debuglevel & dlTraj) {
+        savedebugdata(&r, (unsigned int)id, cfg);
+    }
+
     /*use Kahan summation to accumulate weight, otherwise, counter stops at 16777216*/
     /*http://stackoverflow.com/questions/2148149/how-to-sum-a-large-number-of-float-number*/
     int pidx;
@@ -1781,6 +1831,7 @@ void onephoton(size_t id, raytracer* tracer, tetmesh* mesh, mcconfig* cfg,
     const float int_coef_arr[4] = { -1.f, -1.f, -1.f, 1.f };
     int_coef = _mm_load_ps(int_coef_arr);
 
+    /** retrieve the iMMC ROI size and ray location at initial launch */
     if (cfg->implicit) {
         updateroi(cfg->implicit, &r, tracer->mesh);
         traceroi(&r, tracer, cfg->implicit, 1);
@@ -1979,6 +2030,10 @@ void onephoton(size_t id, raytracer* tracer, tetmesh* mesh, mcconfig* cfg,
         r.slen0 = mc_next_scatter(mesh->med[mesh->type[r.eid - 1]].g, &r.vec, ran, ran0, cfg, &mom);
         r.slen = r.slen0;
 
+        if (cfg->debuglevel & dlTraj) {
+            savedebugdata(&r, (unsigned int)id, cfg);
+        }
+
         if (cfg->mcmethod != mmMCX) {
             albedoweight(&r, mesh, cfg, visit);
         }
@@ -2017,6 +2072,10 @@ void onephoton(size_t id, raytracer* tracer, tetmesh* mesh, mcconfig* cfg,
 
     if (r.photonseed) {
         free(r.photonseed);
+    }
+
+    if (cfg->debuglevel & dlTraj) {
+        savedebugdata(&r, (unsigned int)id, cfg);
     }
 
     if (cfg->srctype != stPattern) {
@@ -2544,6 +2603,16 @@ void visitor_clear(visitor* visit) {
     free(visit->kahanc1);
     visit->kahanc1 = NULL;
 }
+
+/**
+ * @brief Retrieve the roisize (radius of node or edge or thickness of face) if present in the current element
+ *
+ * This function returns ROI size for iMMC simulations
+ *
+ * \param[in] immctype: cfg->implicit = 1: node or edge iMMC, 2: face iMMC
+ * \param[in,out] r: the current ray, r->roisize is the output
+ * \param[in] mesh: the mesh data structure
+ */
 
 void updateroi(int immctype, ray* r, tetmesh* mesh) {
     if (immctype == 1 && mesh->edgeroi) {

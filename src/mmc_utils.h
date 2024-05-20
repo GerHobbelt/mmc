@@ -2,7 +2,7 @@
 **  \mainpage Mesh-based Monte Carlo (MMC) - a 3D photon simulator
 **
 **  \author Qianqian Fang <q.fang at neu.edu>
-**  \copyright Qianqian Fang, 2010-2023
+**  \copyright Qianqian Fang, 2010-2024
 **
 **  \section sref Reference:
 **  \li \c (\b Fang2010) Qianqian Fang, <a href="http://www.opticsinfobase.org/abstract.cfm?uri=boe-1-1-165">
@@ -84,7 +84,7 @@ typedef double OutputType;
 
 enum TDebugLevel {dlMove = 1, dlTracing = 2, dlBary = 4, dlWeight = 8, dlDist = 16, dlTracingEnter = 32,
                   dlTracingExit = 64, dlEdge = 128, dlAccum = 256, dlTime = 512, dlReflect = 1024,
-                  dlProgress = 2048, dlExit = 4096
+                  dlProgress = 2048, dlExit = 4096, dlTraj = 8192
                  };
 
 enum TRTMethod {rtPlucker, rtHavel, rtBadouel, rtBLBadouel, rtBLBadouelGrid};
@@ -266,9 +266,12 @@ typedef struct MMC_config {
     int parentid;
     int optlevel;
     unsigned int maxdetphoton; /*anticipated maximum detected photons*/
+    unsigned int maxjumpdebug;   /**<num of  photon scattering events to save when saving photon trajectory is enabled*/
+    unsigned int debugdatalen;   /**<max number of photon trajectory position length*/
     double* exportfield;     /*memory buffer when returning the flux to external programs such as matlab*/
     unsigned char* exportseed;     /*memory buffer when returning the RNG seed to matlab*/
     float* exportdetected;  /*memory buffer when returning the partial length info to external programs such as matlab*/
+    float* exportdebugdata;      /**<pointer to the buffer where the photon trajectory data are stored*/
     double energytot, energyabs, energyesc;
     unsigned int detectedcount; /**<total number of detected photons*/
     unsigned int runtime;

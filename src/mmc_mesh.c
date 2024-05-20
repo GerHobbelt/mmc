@@ -2,7 +2,7 @@
 **  \mainpage Mesh-based Monte Carlo (MMC) - a 3D photon simulator
 **
 **  \author Qianqian Fang <q.fang at neu.edu>
-**  \copyright Qianqian Fang, 2010-2023
+**  \copyright Qianqian Fang, 2010-2024
 **
 **  \section sref Reference:
 **  \li \c (\b Fang2010) Qianqian Fang, <a href="http://www.opticsinfobase.org/abstract.cfm?uri=boe-1-1-165">
@@ -930,6 +930,38 @@ void tracer_prep(raytracer* tracer, mcconfig* cfg) {
                 tracer->mesh->edgeroi[i * 6] = -count;    // number -1 to -6 indicates how many faces have ROIs
             }
         }
+
+        for (i = 0; i < ne; i++) {
+            if (fabs(tracer->mesh->edgeroi[i * 6]) < EPS) { // if I don't have roi
+                for (j = 0; j < tracer->mesh->elemlen; j++) { // loop over my neighbors
+                    int id = tracer->mesh->facenb[i * tracer->mesh->elemlen + j]; // loop over neighboring elements
+
+                    if (id > 0 && fabs(tracer->mesh->edgeroi[(id - 1) * 6]) > EPS) { // if I don't have roi, but neighbor has, set ref id as -elemid-6, only handle 1 roi neighbor case
+                        tracer->mesh->edgeroi[i * 6] = -id - 6;
+                        break;
+                    }
+                }
+            }
+
+            if (fabs(tracer->mesh->edgeroi[i * 6]) < EPS) { // if I don't have roi
+                for (j = 0; j < tracer->mesh->elemlen; j++) { // loop over my neighbors
+                    int firstnbid = tracer->mesh->facenb[i * tracer->mesh->elemlen + j] - 1; // loop over neighboring elements
+
+                    if (firstnbid < 0) {
+                        continue;
+                    }
+
+                    for (k = 0; k < tracer->mesh->elemlen; k++) { // loop over my j-th neighbor's neighbors
+                        int id = tracer->mesh->facenb[firstnbid * tracer->mesh->elemlen + k]; // loop over 2nd order neighboring elements
+
+                        if (id > 0 && fabs(tracer->mesh->edgeroi[(id - 1) * 6]) > EPS) { // if I don't have roi, but neighbor has, set ref id as -elemid-6, only handle 1 roi neighbor case
+                            tracer->mesh->edgeroi[i * 6] = -id - 6;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // build acceleration data structure to speed up first-neighbor immc face-roi calculation
@@ -953,7 +985,7 @@ void tracer_prep(raytracer* tracer, mcconfig* cfg) {
                 for (j = 0; j < tracer->mesh->elemlen; j++) { // loop over my neighbors
                     int id = tracer->mesh->facenb[i * tracer->mesh->elemlen + j]; // loop over neighboring elements
 
-                    if (id > 0 && tracer->mesh->faceroi[(id - 1) << 2] < 0.f) { // if I don't have roi, but neighbor has, set ref id as -elemid-4, only handle 1 roi neighbor case
+                    if (id > 0 && fabs(tracer->mesh->faceroi[(id - 1) << 2]) > EPS) { // if I don't have roi, but neighbor has, set ref id as -elemid-4, only handle 1 roi neighbor case
                         tracer->mesh->faceroi[i << 2] = -id - 4;
                         break;
                     }
@@ -1304,27 +1336,26 @@ void mesh_saveweight(tetmesh* mesh, mcconfig* cfg, int isref) {
 
 void mesh_savedetphoton(float* ppath, void* seeds, int count, int seedbyte, mcconfig* cfg) {
     FILE* fp;
-    char fhistory[MAX_FULL_PATH];
+    char fhistory[MAX_FULL_PATH], filetag;
+
+    filetag = ((cfg->his.detected == 0  && cfg->his.savedphoton) ? 't' : 'h');
 
     if (cfg->rootpath[0]) {
-        sprintf(fhistory, "%s%c%s.mch", cfg->rootpath, pathsep, cfg->session);
+        sprintf(fhistory, "%s%c%s.mc%c", cfg->rootpath, pathsep, cfg->session, filetag);
     } else {
-        sprintf(fhistory, "%s.mch", cfg->session);
+        sprintf(fhistory, "%s.mc%c", cfg->session, filetag);
     }
 
     if ((fp = fopen(fhistory, "wb")) == NULL) {
         MESH_ERROR("can not open history file to write");
     }
 
-    cfg->his.totalphoton = cfg->nphoton;
     cfg->his.unitinmm = 1.f;
 
     if (cfg->method != rtBLBadouelGrid) {
         cfg->his.unitinmm = cfg->unitinmm;
     }
 
-    cfg->his.detected = count;
-    cfg->his.savedphoton = count;
     cfg->his.srcnum = cfg->srcnum;
     cfg->his.detnum = cfg->detnum;
 
@@ -1332,17 +1363,16 @@ void mesh_savedetphoton(float* ppath, void* seeds, int count, int seedbyte, mcco
         cfg->his.seedbyte = seedbyte;
     }
 
-    cfg->his.colcount = (2 + (cfg->ismomentum > 0)) * cfg->his.maxmedia + (cfg->issaveexit > 0) * 6 + 2; /*column count=maxmedia+3*/
+    /*
+        if (count > 0 && cfg->exportdetected == NULL) {
+            cfg->detectedcount = count;
+            cfg->exportdetected = (float*)malloc(cfg->his.colcount * cfg->detectedcount * sizeof(float));
+        }
 
-    if (count > 0 && cfg->exportdetected == NULL) {
-        cfg->detectedcount = count;
-        cfg->exportdetected = (float*)malloc(cfg->his.colcount * cfg->detectedcount * sizeof(float));
-    }
-
-    if (cfg->exportdetected != ppath) {
-        memcpy(cfg->exportdetected, ppath, count * cfg->his.colcount * sizeof(float));
-    }
-
+        if (cfg->exportdetected != ppath) {
+            memcpy(cfg->exportdetected, ppath, count * cfg->his.colcount * sizeof(float));
+        }
+    */
     fwrite(&(cfg->his), sizeof(history), 1, fp);
     fwrite(ppath, sizeof(float), count * cfg->his.colcount, fp);
 
