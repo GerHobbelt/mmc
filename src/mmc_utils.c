@@ -336,7 +336,7 @@ void mcx_initcfg(mcconfig* cfg) {
     cfg->elemlen = 0;
     cfg->node = NULL;
     cfg->elem = NULL;
-    cfg->roitype = 0;
+    cfg->roitype = rtNone;
     cfg->roidata = NULL;
 
 #ifdef MCX_EMBED_CL
@@ -1250,17 +1250,18 @@ int mcx_loadfromjson(char* jbuf, mcconfig* cfg) {
 
 int mcx_loadjson(cJSON* root, mcconfig* cfg) {
     int i;
-    cJSON* Mesh, *Optode, *Forward, *Session, *tmp, *subitem;
+    cJSON* Mesh, *Optode, *Forward, *Session, *Domain, *tmp, *subitem;
 
     Mesh    = cJSON_GetObjectItem(root, "Mesh");
 
     if (!Mesh) {
-        Mesh    = cJSON_GetObjectItem(root, "Domain");
+        Mesh    = cJSON_GetObjectItem(root, "Shapes");
     }
 
     Optode  = cJSON_GetObjectItem(root, "Optode");
     Session = cJSON_GetObjectItem(root, "Session");
     Forward = cJSON_GetObjectItem(root, "Forward");
+    Domain  = cJSON_GetObjectItem(root, "Domain");
 
     if (Mesh) {
         subitem = FIND_JSON_OBJ("MeshID", "Mesh.MeshID", Mesh);
@@ -1286,7 +1287,7 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
                 if (cJSON_IsArray(subitem)) {
                     cfg->nodenum = cJSON_GetArraySize(subitem);
                     subitem = subitem->child;
-                    cfg->node = (float3*)malloc(sizeof(float3) * cfg->nodenum);
+                    cfg->node = (FLOAT3*)malloc(sizeof(FLOAT3) * cfg->nodenum);
 
                     for (int i = 0; i < cfg->nodenum; i++) {
                         if (cJSON_GetArraySize(subitem) != 3) {
@@ -1413,8 +1414,10 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
         if (!flagset['u']) {
             cfg->unitinmm = FIND_JSON_KEY("LengthUnit", "Mesh.LengthUnit", Mesh, 1.0, valuedouble);
         }
+    }
 
-        cJSON* meds = FIND_JSON_OBJ("Media", "Domain.Media", Mesh);
+    if (Domain) {
+        cJSON* val, *meds = FIND_JSON_OBJ("Media", "Domain.Media", Domain);
 
         if (meds) {
             cJSON* med = meds->child;
@@ -1430,7 +1433,7 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
 
                 for (i = 0; i < cfg->medianum; i++) {
                     if (cJSON_IsObject(med)) {
-                        cJSON* val = FIND_JSON_OBJ("mua", (MMC_ERROR(-1, "You must specify absorption coeff, default in 1/mm"), ""), med);
+                        val = FIND_JSON_OBJ("mua", (MMC_ERROR(-1, "You must specify absorption coeff, default in 1/mm"), ""), med);
 
                         if (val) {
                             cfg->prop[i].mua = val->valuedouble;
@@ -1469,6 +1472,22 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
                     }
                 }
             }
+        }
+
+        val = FIND_JSON_OBJ("Step", "Domain.Step", Domain);
+
+        if (val) {
+            if (cJSON_GetArraySize(val) >= 1) {
+                cfg->steps.x = val->child->valuedouble;
+                cfg->steps.y = cfg->steps.x;
+                cfg->steps.z = cfg->steps.x;
+            } else {
+                MMC_ERROR(-1, "Domain::Step has incorrect element numbers");
+            }
+        }
+
+        if (!flagset['u']) {
+            cfg->unitinmm = FIND_JSON_KEY("LengthUnit", "Domain.LengthUnit", Domain, 1.0, valuedouble);
         }
     }
 
@@ -3178,7 +3197,7 @@ void mcx_parsecmd(int argc, char* argv[], mcconfig* cfg) {
                     } else if (strcmp(argv[i] + 2, "buffer") == 0) {
                         i = mcx_readarg(argc, argv, i, &(cfg->nbuffer), "int");
                     } else if (strcmp(argv[i] + 2, "gridsize") == 0) {
-                        i = mcx_readarg(argc, argv, i, &(cfg->steps.x), "int");
+                        i = mcx_readarg(argc, argv, i, &(cfg->steps.x), "float");
                         cfg->steps.y = cfg->steps.x;
                         cfg->steps.z = cfg->steps.x;
                     } else {
