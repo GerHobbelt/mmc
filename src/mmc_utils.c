@@ -47,6 +47,7 @@
 #include "mmc_utils.h"
 #include "mmc_const.h"
 #include "mmc_bench.h"
+#include "mmc_neurojson.h"
 #include "zmat/zmatlib.h"
 #include "ubj/ubj.h"
 
@@ -105,7 +106,7 @@
 const char shortopt[] = {'h', 'E', 'f', 'n', 'A', 't', 'T', 's', 'a', 'g', 'b', 'D', 'G',
                          'd', 'r', 'S', 'e', 'U', 'R', 'l', 'L', 'I', '-', 'u', 'C', 'M',
                          'i', 'V', 'O', '-', 'F', 'q', 'x', 'P', 'k', 'v', 'm', '-', '-',
-                         'J', 'o', 'H', '-', 'W', 'X', '-', 'c', '-', '-', 'Z', '\0'
+                         'J', 'o', 'H', '-', 'W', 'X', '-', 'c', 'Q', '-', 'Z', 'N', '\0'
                         };
 
 /**
@@ -124,7 +125,7 @@ const char* fullopt[] = {"--help", "--seed", "--input", "--photon", "--autopilot
                          "--replaydet", "--voidtime", "--version", "--mc", "--atomic",
                          "--debugphoton", "--compileropt", "--optlevel", "--maxdetphoton",
                          "--buffer", "--workload", "--saveref", "--gridsize", "--compute",
-                         "--bench", "--dumpjson", "--zip", ""
+                         "--bench", "--dumpjson", "--zip", "--net", ""
                         };
 
 extern char pathsep;
@@ -881,17 +882,29 @@ void mcx_savedata(OutputType* dat, size_t len, mcconfig* cfg, int isref) {
         mcx_savenii(dat, len, name, NIFTI_TYPE_FLOAT64, cfg->outputformat, cfg);
         return;
     } else if (cfg->outputformat == ofJNifti || cfg->outputformat == ofBJNifti) {
-        uint dims[6] = {cfg->dim.x, cfg->dim.y, cfg->dim.z, cfg->maxgate, cfg->srcnum, 1};
+        uint dims[6] = {cfg->dim.x, cfg->dim.y, cfg->dim.z, cfg->maxgate, cfg->srcnum, 1}, lastdim = 5;
         float voxelsize[6] = {cfg->steps.x, cfg->steps.y, cfg->steps.z, cfg->tstep, 1, 1};
 
+        if (cfg->method != rtBLBadouelGrid) {
+            dims[0] = cfg->nodenum;
+            dims[1] = cfg->maxgate;
+            dims[2] = cfg->srcnum;
+            dims[3] = 1;
+            lastdim = 3;
+            voxelsize[0] = 1.f;
+            voxelsize[1] = cfg->tstep;
+            voxelsize[2] = 1.f;
+            voxelsize[3] = 1.f;
+        }
+
         if (cfg->seed == SEED_FROM_FILE && (cfg->replaydet == -1 && cfg->detnum > 1)) {
-            dims[5] *= cfg->detnum;
+            dims[lastdim] *= cfg->detnum;
         }
 
         if (cfg->outputformat == ofJNifti) {
-            mcx_savejnii(dat, 5 + (dims[5] > 1), dims, voxelsize, name, 1, 1, cfg);
+            mcx_savejnii(dat, lastdim + (dims[lastdim] > 1), dims, voxelsize, name, 1, (cfg->method == rtBLBadouelGrid), cfg);
         } else {
-            mcx_savebnii(dat, 5 + (dims[5] > 1), dims, voxelsize, name, 1, 1, cfg);
+            mcx_savebnii(dat, lastdim + (dims[lastdim] > 1), dims, voxelsize, name, 1, (cfg->method == rtBLBadouelGrid), cfg);
         }
 
         return;
@@ -1733,7 +1746,7 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
             cfg->basisorder = FIND_JSON_KEY("BasisOrder", "Session.BasisOrder", Session, cfg->basisorder, valueint);
         }
 
-        if (!cfg->outputformat) {
+        if (!flagset['F']) {
             cfg->outputformat = mcx_keylookup((char*)FIND_JSON_KEY("OutputFormat", "Session.OutputFormat", Session, "ascii", valuestring), outputformat);
         }
 
@@ -2214,7 +2227,6 @@ void mcx_savejdata(char* filename, mcconfig* cfg) {
     }
 
     cJSON_AddItemToObject(obj, "Dim", cJSON_CreateIntArray((int*) & (cfg->dim.x), 3));
-    cJSON_AddNumberToObject(obj, "OriginType", 1);
 
     /* the "Optode" section */
     cJSON_AddItemToObject(root, "Optode", obj = cJSON_CreateObject());
@@ -3247,6 +3259,67 @@ void mcx_parsecmd(int argc, char* argv[], mcconfig* cfg) {
                     i = mcx_readarg(argc, argv, i, cfg->workload, "floatlist");
                     break;
 
+                case 'Q':
+                    if (i + 1 < argc && isalpha((int)(argv[i + 1][0])) ) {
+                        int idx = mcx_keylookup(argv[++i], benchname);
+
+                        if (idx == -1) {
+                            MMC_ERROR(-1, "Unsupported bechmark.");
+                        }
+
+                        isinteractive = 0;
+                        jsoninput = (char*)benchjson[idx];
+                    } else {
+                        MMC_FPRINTF(cfg->flog, "Built-in benchmarks:\n");
+
+                        for (i = 0; i < sizeof(benchname) / sizeof(char*) - 1; i++) {
+                            MMC_FPRINTF(cfg->flog, "\t%s\n", benchname[i]);
+                        }
+
+                        exit(0);
+                    }
+
+                    break;
+
+                case 'N':
+                    if (i == argc - 1 || argv[i + 1][0] == '-') {
+                        int j, doclen;
+                        char* jbuf = NULL;
+                        runcommand("curl -s -X GET \"https://neurojson.io:7777/mmc/_all_docs\"", "", &jbuf);
+                        cJSON* root = cJSON_Parse(jbuf), *docs = cJSON_GetObjectItem(root, "rows"), *subitem, *tmp;
+
+                        if (!docs) {
+                            MMC_ERROR(-1, jbuf);
+                        }
+
+                        doclen = cJSON_GetArraySize(docs);
+                        subitem = docs->child;
+                        printf("Downloading %d simulations from NeuroJSON.io (https://neurojson.org/db/mmc)\n", doclen - 1);
+
+                        for (j = 0; j < doclen; j++) {
+                            if (strchr(FIND_JSON_KEY("id", "id", subitem, "", valuestring), '_') == NULL) {
+                                printf("\t%s\n", FIND_JSON_KEY("id", "id", subitem, "", valuestring));
+                            }
+
+                            subitem = subitem->next;
+                        }
+
+                        free(jbuf);
+                        exit(0);
+                    } else {
+                        if (strstr(argv[i + 1], "http") == argv[i + 1]) {
+                            runcommand("curl -s -X GET ", argv[i + 1], &jsoninput);
+                        } else if (strchr(argv[i + 1], '/')) {
+                            runcommand("curl -s -X GET https://neurojson.io:7777/", argv[i + 1], &jsoninput);
+                        } else {
+                            runcommand("curl -s -X GET https://neurojson.io:7777/mmc/", argv[i + 1], &jsoninput);
+                        }
+
+                        isinteractive = 2;
+                    }
+
+                    break;
+
                 case '-':  /*additional verbose parameters*/
                     if (strcmp(argv[i] + 2, "momentum") == 0) {
                         i = mcx_readarg(argc, argv, i, &(cfg->ismomentum), "bool");
@@ -3270,25 +3343,6 @@ void mcx_parsecmd(int argc, char* argv[], mcconfig* cfg) {
                             i++;
                         } else {
                             i = mcx_readarg(argc, argv, i, &(cfg->isdumpjson), "int");
-                        }
-                    } else if (strcmp(argv[i] + 2, "bench") == 0) {
-                        if (i + 1 < argc && isalpha((int)(argv[i + 1][0])) ) {
-                            int idx = mcx_keylookup(argv[++i], benchname);
-
-                            if (idx == -1) {
-                                MMC_ERROR(-1, "Unsupported bechmark.");
-                            }
-
-                            isinteractive = 0;
-                            jsoninput = (char*)benchjson[idx];
-                        } else {
-                            MMC_FPRINTF(cfg->flog, "Built-in benchmarks:\n");
-
-                            for (i = 0; i < sizeof(benchname) / sizeof(char*) - 1; i++) {
-                                MMC_FPRINTF(cfg->flog, "\t%s\n", benchname[i]);
-                            }
-
-                            exit(0);
                         }
                     } else if (strcmp(argv[i] + 2, "debugphoton") == 0) {
                         i = mcx_readarg(argc, argv, i, &(cfg->debugphoton), "int");
@@ -3351,7 +3405,10 @@ void mcx_parsecmd(int argc, char* argv[], mcconfig* cfg) {
     }
 
     if (cfg->isgpuinfo != 2) { /*print gpu info only*/
-        if (isinteractive) {
+        if (isinteractive == 2 && jsoninput) {
+            mcx_loadfromjson(jsoninput, cfg);
+            free(jsoninput);
+        } else if (isinteractive) {
             mcx_readconfig("", cfg);
         } else if (jsoninput) {
             mcx_loadfromjson(jsoninput, cfg);
@@ -3449,6 +3506,10 @@ where possible parameters include (the first item in [] is the default value)\n\
 \n"S_BOLD S_CYAN"\
 == Required option ==\n"S_RESET"\
  -f config     (--input)       read an input file in .json or inp format\n\
+ -Q benchmark  (--bench)       run a built-in benchmark, -Q only to list\n\
+ -N benchmark  (--net)         get benchmark from NeuroJSON.io, -N only to list\n\
+                               benchmark can be dataset URL,or dbname/benchname\n\
+                               requires 'curl', install from https://curl.se/\n\
 \n"S_BOLD S_CYAN"\
 == MC options ==\n"S_RESET"\
  -n [0.|float] (--photon)      total photon number, max allowed value is 2^32-1\n\
