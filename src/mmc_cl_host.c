@@ -2,7 +2,7 @@
 **  \mainpage Mesh-based Monte Carlo (MMC) - a 3D photon simulator
 **
 **  \author Qianqian Fang <q.fang at neu.edu>
-**  \copyright Qianqian Fang, 2010-2024
+**  \copyright Qianqian Fang, 2010-2025
 **
 **  \section sref Reference:
 **  \li \c (\b Fang2010) Qianqian Fang, <a href="http://www.opticsinfobase.org/abstract.cfm?uri=boe-1-1-165">
@@ -202,8 +202,8 @@ void mmc_run_cl(mcconfig* cfg, tetmesh* mesh, raytracer* tracer) {
             gpu[i].maxgate = cfg->maxgate;
         } else {
             // persistent thread mode
-            if (gpu[i].vendor == dvIntelGPU) { // Intel HD graphics GPU
-                gpu[i].autoblock  = 64;
+            if (gpu[i].vendor == dvIntelGPU || gpu[i].vendor == dvIntel) { // Intel HD graphics GPU
+                gpu[i].autoblock  = (gpu[i].vendor == dvIntelGPU) ? 64 : 1;
                 gpu[i].autothread = gpu[i].autoblock * 7 * gpu[i].sm; // 7 thread x SIMD-16 per Exec Unit (EU)
             } else if (gpu[i].vendor == dvAMD) { // AMD GPU
                 gpu[i].autoblock  = 64;

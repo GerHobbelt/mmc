@@ -2,7 +2,7 @@
 **  \mainpage Mesh-based Monte Carlo (MMC) - a 3D photon simulator
 **
 **  \author Qianqian Fang <q.fang at neu.edu>
-**  \copyright Qianqian Fang, 2010-2024
+**  \copyright Qianqian Fang, 2010-2025
 **
 **  \section sref Reference:
 **  \li \c (\b Fang2010) Qianqian Fang, <a href="http://www.opticsinfobase.org/abstract.cfm?uri=boe-1-1-165">
@@ -321,7 +321,7 @@ cl_platform_id mcx_list_cl_gpu(mcconfig* cfg, unsigned int* activedev, cl_device
                         } else if (strstr(pbuf, "Intel") && strstr(cuinfo.name, "Graphics") && j == 0) {
                             cuinfo.autoblock = 64;
                             cuinfo.vendor = dvIntelGPU;
-                        } else if (strstr(pbuf, "Intel")) {
+                        } else if (strstr(pbuf, "Intel" || strstr(cuinfo.name, "Intel"))) {
                             cuinfo.vendor = dvIntel;
                         }
 

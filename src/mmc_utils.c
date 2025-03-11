@@ -2,7 +2,7 @@
 **  \mainpage Mesh-based Monte Carlo (MMC) - a 3D photon simulator
 **
 **  \author Qianqian Fang <q.fang at neu.edu>
-**  \copyright Qianqian Fang, 2010-2024
+**  \copyright Qianqian Fang, 2010-2025
 **
 **  \section sref Reference:
 **  \li \c (\b Fang2010) Qianqian Fang, <a href="http://www.opticsinfobase.org/abstract.cfm?uri=boe-1-1-165">
@@ -3036,6 +3036,10 @@ void mcx_parsecmd(int argc, char* argv[], mcconfig* cfg) {
                     if (i < argc - 1 && argv[i + 1][0] == '{') {
                         jsoninput = argv[i + 1];
                         i++;
+                    } else if (i == argc - 1 || argv[i + 1][0] == '-') {
+                        runcommand("", "", &jsoninput);
+                        isinteractive = 2;
+                        i += (i < argc - 1);
                     } else {
                         i = mcx_readarg(argc, argv, i, filename, "string");
                     }
@@ -3474,8 +3478,8 @@ void mcx_printheader(mcconfig* cfg) {
     MMC_FPRINTF(cfg->flog, S_YELLOW "\
 ###############################################################################\n\
 #                     Mesh-based Monte Carlo (MMC) - OpenCL                   #\n\
-#          Copyright (c) 2010-2024 Qianqian Fang <q.fang at neu.edu>          #\n\
-#" S_BLUE "              https://mcx.space/#mmc  &  https://neurojson.io/               " S_YELLOW "#\n\
+#          Copyright (c) 2010-2025 Qianqian Fang <q.fang at neu.edu>          #\n\
+#" S_BLUE "              https://mcx.space/#mmc  &  https://neurojson.io                " S_YELLOW "#\n\
 #                                                                             #\n\
 #Computational Optics & Translational Imaging (COTI) Lab  [http://fanglab.org]#\n\
 #   Department of Bioengineering, Northeastern University, Boston, MA, USA    #\n\
@@ -3485,10 +3489,10 @@ void mcx_printheader(mcconfig* cfg) {
 #  Open-source codes and reusable scientific data are essential for research, #\n\
 # MCX proudly developed human-readable JSON-based data formats for easy reuse.#\n\
 #                                                                             #\n\
-#Please visit our free scientific data sharing portal at " S_BLUE "https://neurojson.io/" S_YELLOW "#\n\
+#Please visit our free scientific data sharing portal at " S_BLUE "https://neurojson.io " S_YELLOW "#\n\
 # and consider sharing your public datasets in standardized JSON/JData format #\n\
 ###############################################################################\n\
-$Rev::      $" S_GREEN MMC_VERSION S_YELLOW " $Date::                       $ by $Author::             $\n\
+$Rev::       $ " S_GREEN MMC_VERSION S_YELLOW " $Date::                       $ by $Author::             $\n\
 ###############################################################################\n"S_RESET);
 }
 
@@ -3505,7 +3509,10 @@ usage: %s <param1> <param2> ...\n\
 where possible parameters include (the first item in [] is the default value)\n\
 \n"S_BOLD S_CYAN"\
 == Required option ==\n"S_RESET"\
- -f config     (--input)       read an input file in .json or inp format\n\
+ -f config     (--input)       read an input file in the .json format,if config\n\
+                               string starts with '{',it is parsed as an inline\n\
+                               JSON input file; if -f is followed by nothing or\n\
+                               a single '-', it reads input from stdin via pipe\n\
  -Q benchmark  (--bench)       run a built-in benchmark, -Q only to list\n\
  -N benchmark  (--net)         get benchmark from NeuroJSON.io, -N only to list\n\
                                benchmark can be dataset URL,or dbname/benchname\n\
@@ -3631,7 +3638,22 @@ where possible parameters include (the first item in [] is the default value)\n\
                                stored (default: 1e7)\n\
 \n"S_BOLD S_CYAN"\
 == Example ==\n"S_RESET"\
-       %s -n 1000000 -f input.json -s test -b 0 -D TP -G -1\n", exename,
+example: (list built-in benchmarks: -Q/--bench)\n"S_CYAN"\
+       %s -Q\n" S_RESET"\
+or (use multiple devices - 1st,2nd and 4th GPUs - together with equal load)\n"S_CYAN"\
+       %s -Q dmmc-cube60 -n 1e7 -G 1101 -W 10,10,10\n" S_RESET"\
+or (use inline json setting modifier)\n"S_CYAN"\
+       %s -f input.json -j '{\"Optode\":{\"Source\":{\"Type\":\"isotropic\"}}}'\n" S_RESET"\
+or (dump simulation in a single json file)\n"S_CYAN"\
+       %s -Q dmmc-cube60 --dumpjson\n" S_RESET"\
+or (use -N/--net to browse community-contributed mmc simulations at https://neurojson.io)\n"S_CYAN"\
+       %s -N\n" S_RESET"\
+or (run user-shared mmc simulations, see full list at https://neurojson.org/db/mmc)\n"S_CYAN"\
+       %s -N dmmc-cube60\n" S_RESET"\
+or (use -f - to read piped input file modified by shell text processing utilities)\n"S_CYAN"\
+       %s -Q dmmc-cube60 --dumpjson | sed -e 's/pencil/isotropic/g' | %s -f -\n" S_RESET"\
+or (download/modify simulations from NeuroJSON.io and run with mmc -f)\n"S_CYAN"\
+       curl -s -X GET https://neurojson.io:7777/mmc/dmmc-cube60 | jq '.Forward.Dt = 1e-9' | %s -f\n", exename,
 #ifdef USE_OPENCL
            'G',
 #else
@@ -3641,5 +3663,5 @@ where possible parameters include (the first item in [] is the default value)\n\
            'P',
 #endif
 #endif
-           exename);
+           exename, exename, exename, exename, exename, exename, exename, exename, exename);
 }
