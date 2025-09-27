@@ -49,7 +49,7 @@ void EASYLZMA_API elzma_compress_set_allocation_callbacks(
 void EASYLZMA_API elzma_compress_free(elzma_compress_handle * hand);
 
 /**
- * Set configuration paramters for a compression run.  If not called,
+ * Set configuration parameters for a compression run.  If not called,
  * reasonable defaults will be used.
  */ 
 int EASYLZMA_API elzma_compress_config(elzma_compress_handle hand,
