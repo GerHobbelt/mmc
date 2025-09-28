@@ -349,9 +349,9 @@ void parse_config(const py::dict& user_cfg, mcconfig& mcx_config, tetmesh& mesh)
             free(mesh.type);
         }
 
-        mesh.type = (int*) malloc(mesh.nn * sizeof(int));
+        mesh.type = (int*) malloc(mesh.ne * sizeof(int));
         auto val = static_cast<int*>(buffer_info.ptr);
-        memcpy(mesh.type, val, mesh.nn * sizeof(int));
+        memcpy(mesh.type, val, mesh.ne * sizeof(int));
     }
 
 
@@ -678,12 +678,12 @@ void parse_config(const py::dict& user_cfg, mcconfig& mcx_config, tetmesh& mesh)
         }
     }
 
-    if (mesh.facenb == NULL) {
-        mesh_getfacenb(&mesh, &mcx_config);
-    }
-
     if (mesh.evol == NULL) {
         mesh_getvolume(&mesh, &mcx_config);
+    }
+
+    if (mesh.facenb == NULL) {
+        mesh_getfacenb(&mesh, &mcx_config);
     }
 
     if (!user_cfg.contains("e0")) {
@@ -721,7 +721,7 @@ py::dict pmmc_interface(const py::dict& user_cfg) {
     unsigned int active_dev = 0;     /** activeDev: count of total active GPUs to be used */
     std::vector<std::string> exception_msgs;
     int thread_id = 0;
-    size_t field_dim[6];
+    size_t field_dim[5] = {0};
     py::dict output;
 
     try {
@@ -758,19 +758,6 @@ py::dict pmmc_interface(const py::dict& user_cfg) {
         /** One must define the domain and properties */
         if (mesh.node == nullptr || mesh.prop == 0) {
             throw py::value_error("You must define 'node' and 'prop' field.");
-        }
-
-        /** Initialize all buffers necessary to store the output variables */
-        if (mcx_config.issave2pt == 1) {
-            size_t field_len =
-                static_cast<int>(mcx_config.dim.x) * static_cast<int>(mcx_config.dim.y) * static_cast<int>(mcx_config.dim.z) *
-                (size_t) ((mcx_config.tend - mcx_config.tstart) / mcx_config.tstep + 0.5) * mcx_config.srcnum;
-
-            if (mcx_config.photonseed != nullptr && mcx_config.replaydet == -1) {
-                field_len *= mcx_config.detnum;
-            }
-
-            mcx_config.exportfield = (double*) calloc(field_len, sizeof(double));
         }
 
 #if defined(MMC_LOGISTIC) || defined(MMC_SFMT)
@@ -830,9 +817,6 @@ py::dict pmmc_interface(const py::dict& user_cfg) {
         if (!exception_msgs.empty()) {
             throw py::runtime_error("PMMC terminated due to an exception!");
         }
-
-        field_dim[4] = 1;
-        field_dim[5] = 1;
 
         if (mcx_config.debuglevel & MCX_DEBUG_MOVE) {
             field_dim[0] = MCX_DEBUG_REC_LEN;
@@ -901,8 +885,8 @@ py::dict pmmc_interface(const py::dict& user_cfg) {
             field_dim[0] = mcx_config.srcnum;
             field_dim[1] = datalen;
             field_dim[2] = mcx_config.maxgate;
-            field_dim[3] = 1;
-            field_dim[4] = 1;
+            field_dim[3] = 0;
+            field_dim[4] = 0;
 
             std::vector<size_t> array_dims;
 
@@ -914,9 +898,9 @@ py::dict pmmc_interface(const py::dict& user_cfg) {
                 field_dim[4] = mcx_config.maxgate;
 
                 if (mcx_config.srcnum > 1) {
-                    array_dims = {field_dim[0], field_dim[1], field_dim[2], field_dim[3], field_dim[4], field_dim[5]};
+                    array_dims = {field_dim[0], field_dim[1], field_dim[2], field_dim[3], field_dim[4]};
                 } else {
-                    array_dims = {field_dim[1], field_dim[2], field_dim[3], field_dim[4], field_dim[5]};
+                    array_dims = {field_dim[1], field_dim[2], field_dim[3], field_dim[4]};
                 }
             } else {
                 if (mcx_config.srcnum > 1) {
@@ -936,7 +920,7 @@ py::dict pmmc_interface(const py::dict& user_cfg) {
                 array_dims = {field_dim[1], field_dim[2]};
                 auto dref_array = py::array_t<double, py::array::f_style>(array_dims);
                 auto* dref = static_cast<double*>(dref_array.mutable_data());
-                memcpy(dref, mcx_config.exportfield, dref_array.size() * sizeof(double));
+                memcpy(dref, mesh.dref, dref_array.size() * sizeof(double));
 
                 output["dref"] = dref_array;
             }
