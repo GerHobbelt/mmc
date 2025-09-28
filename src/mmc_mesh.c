@@ -36,6 +36,7 @@
 *******************************************************************************/
 
 #include <stdlib.h>
+#include "mmc_const.h"
 #include "mmc_mesh.h"
 #include <string.h>
 #include "mmc_highorder.h"
@@ -702,54 +703,6 @@ void mesh_loadelem(tetmesh* mesh, mcconfig* cfg) {
 }
 
 /**
- * @brief Compute the tetrahedron and nodal volumes if not provided
- *
- * @param[in] mesh: the mesh object
- * @param[in] cfg: the simulation configuration structure
- */
-
-
-void mesh_getvolume(tetmesh* mesh, mcconfig* cfg) {
-    float dx, dy, dz;
-    int i, j;
-
-    mesh->evol = (float*)calloc(sizeof(float), mesh->ne);
-    mesh->nvol = (float*)calloc(sizeof(float), mesh->nn);
-
-    for (i = 0; i < mesh->ne; i++) {
-        int* ee = (int*)(mesh->elem + i * mesh->elemlen);
-
-        dx = mesh->node[ee[2] - 1].x - mesh->node[ee[3] - 1].x;
-        dy = mesh->node[ee[2] - 1].y - mesh->node[ee[3] - 1].y;
-        dz = mesh->node[ee[2] - 1].z - mesh->node[ee[3] - 1].z;
-
-        mesh->evol[i] = mesh->node[ee[1] - 1].x * (mesh->node[ee[2] - 1].y * mesh->node[ee[3] - 1].z - mesh->node[ee[2] - 1].z * mesh->node[ee[3] - 1].y)
-                        - mesh->node[ee[1] - 1].y * (mesh->node[ee[2] - 1].x * mesh->node[ee[3] - 1].z - mesh->node[ee[2] - 1].z * mesh->node[ee[3] - 1].x)
-                        + mesh->node[ee[1] - 1].z * (mesh->node[ee[2] - 1].x * mesh->node[ee[3] - 1].y - mesh->node[ee[2] - 1].y * mesh->node[ee[3] - 1].x);
-        mesh->evol[i] += -mesh->node[ee[0] - 1].x * ((mesh->node[ee[2] - 1].y * mesh->node[ee[3] - 1].z - mesh->node[ee[2] - 1].z * mesh->node[ee[3] - 1].y) + mesh->node[ee[1] - 1].y * dz - mesh->node[ee[1] - 1].z * dy);
-        mesh->evol[i] += +mesh->node[ee[0] - 1].y * ((mesh->node[ee[2] - 1].x * mesh->node[ee[3] - 1].z - mesh->node[ee[2] - 1].z * mesh->node[ee[3] - 1].x) + mesh->node[ee[1] - 1].x * dz - mesh->node[ee[1] - 1].z * dx);
-        mesh->evol[i] += -mesh->node[ee[0] - 1].z * ((mesh->node[ee[2] - 1].x * mesh->node[ee[3] - 1].y - mesh->node[ee[2] - 1].y * mesh->node[ee[3] - 1].x) + mesh->node[ee[1] - 1].x * dy - mesh->node[ee[1] - 1].y * dx);
-        mesh->evol[i] = -mesh->evol[i];
-
-        if (mesh->evol[i] < 0.f) {
-            int e1 = ee[3];
-            ee[3] = ee [2];
-            ee[2] = e1;
-        }
-
-        mesh->evol[i] *= (1.f / 6.f);
-
-        if (mesh->type[i] == 0) {
-            continue;
-        }
-
-        for (j = 0; j < mesh->elemlen; j++) {
-            mesh->nvol[ee[j] - 1] += mesh->evol[i] * 0.25f;
-        }
-    }
-}
-
-/**
  * @brief Load tet element volume file and initialize the related mesh properties
  *
  * @param[in] mesh: the mesh object
@@ -934,6 +887,54 @@ void mesh_loadseedfile(tetmesh* mesh, mcconfig* cfg) {
 }
 
 #endif
+
+/**
+ * @brief Compute the tetrahedron and nodal volumes if not provided
+ *
+ * @param[in] mesh: the mesh object
+ * @param[in] cfg: the simulation configuration structure
+ */
+
+
+void mesh_getvolume(tetmesh* mesh, mcconfig* cfg) {
+    float dx, dy, dz;
+    int i, j;
+
+    mesh->evol = (float*)calloc(sizeof(float), mesh->ne);
+    mesh->nvol = (float*)calloc(sizeof(float), mesh->nn);
+
+    for (i = 0; i < mesh->ne; i++) {
+        int* ee = (int*)(mesh->elem + i * mesh->elemlen);
+
+        dx = mesh->node[ee[2] - 1].x - mesh->node[ee[3] - 1].x;
+        dy = mesh->node[ee[2] - 1].y - mesh->node[ee[3] - 1].y;
+        dz = mesh->node[ee[2] - 1].z - mesh->node[ee[3] - 1].z;
+
+        mesh->evol[i] = mesh->node[ee[1] - 1].x * (mesh->node[ee[2] - 1].y * mesh->node[ee[3] - 1].z - mesh->node[ee[2] - 1].z * mesh->node[ee[3] - 1].y)
+                        - mesh->node[ee[1] - 1].y * (mesh->node[ee[2] - 1].x * mesh->node[ee[3] - 1].z - mesh->node[ee[2] - 1].z * mesh->node[ee[3] - 1].x)
+                        + mesh->node[ee[1] - 1].z * (mesh->node[ee[2] - 1].x * mesh->node[ee[3] - 1].y - mesh->node[ee[2] - 1].y * mesh->node[ee[3] - 1].x);
+        mesh->evol[i] += -mesh->node[ee[0] - 1].x * ((mesh->node[ee[2] - 1].y * mesh->node[ee[3] - 1].z - mesh->node[ee[2] - 1].z * mesh->node[ee[3] - 1].y) + mesh->node[ee[1] - 1].y * dz - mesh->node[ee[1] - 1].z * dy);
+        mesh->evol[i] += +mesh->node[ee[0] - 1].y * ((mesh->node[ee[2] - 1].x * mesh->node[ee[3] - 1].z - mesh->node[ee[2] - 1].z * mesh->node[ee[3] - 1].x) + mesh->node[ee[1] - 1].x * dz - mesh->node[ee[1] - 1].z * dx);
+        mesh->evol[i] += -mesh->node[ee[0] - 1].z * ((mesh->node[ee[2] - 1].x * mesh->node[ee[3] - 1].y - mesh->node[ee[2] - 1].y * mesh->node[ee[3] - 1].x) + mesh->node[ee[1] - 1].x * dy - mesh->node[ee[1] - 1].y * dx);
+        mesh->evol[i] = -mesh->evol[i];
+
+        if (mesh->evol[i] < 0.f) {
+            int e1 = ee[3];
+            ee[3] = ee [2];
+            ee[2] = e1;
+        }
+
+        mesh->evol[i] *= (1.f / 6.f);
+
+        if (mesh->type[i] == 0) {
+            continue;
+        }
+
+        for (j = 0; j < mesh->elemlen; j++) {
+            mesh->nvol[ee[j] - 1] += mesh->evol[i] * 0.25f;
+        }
+    }
+}
 
 /**
  * @brief Scan all tetrahedral elements to find the one enclosing the source
@@ -1890,4 +1891,79 @@ double mesh_getreff(double n_in, double n_out) {
     r_phi *= ostep;
     r_j *= ostep;
     return (r_phi + r_j) / (2.0 - r_phi + r_j);
+}
+
+
+/**
+ * @brief Validate all input fields, and warn incompatible inputs
+ *
+ * Perform self-checking and raise exceptions or warnings when input error is detected
+ *
+ * @param[in,out] cfg: the simulation configuration structure
+ * @param[out] mesh: the mesh data structure
+ */
+
+void mesh_validate(tetmesh* mesh, mcconfig* cfg) {
+    int i, j, *ee, datalen;
+
+    if (mesh->prop == 0) {
+        MMC_ERROR(999, "you must define the 'prop' field in the input structure");
+    }
+
+    if (mesh->nn == 0 || mesh->ne == 0 || mesh->evol == NULL || mesh->facenb == NULL) {
+        MMC_ERROR(999, "a complete input mesh include 'node','elem','facenb' and 'evol'");
+    }
+
+    if (mesh->node == NULL || mesh->elem == NULL || mesh->prop == 0) {
+        MMC_ERROR(999, "You must define 'mesh' and 'prop' fields.");
+    }
+
+    if (mesh->nvol) {
+        free(mesh->nvol);
+    }
+
+    mesh->nvol = (float*)calloc(sizeof(float), mesh->nn);
+
+    for (i = 0; i < mesh->ne; i++) {
+        if (mesh->type[i] <= 0) {
+            continue;
+        }
+
+        ee = (int*)(mesh->elem + i * mesh->elemlen);
+
+        for (j = 0; j < 4; j++) {
+            mesh->nvol[ee[j] - 1] += mesh->evol[i] * 0.25f;
+        }
+    }
+
+    if (mesh->weight) {
+        free(mesh->weight);
+    }
+
+    if (cfg->method == rtBLBadouelGrid) {
+        mesh_createdualmesh(mesh, cfg);
+        cfg->basisorder = 0;
+    }
+
+    datalen = (cfg->method == rtBLBadouelGrid) ? cfg->crop0.z : ( (cfg->basisorder) ? mesh->nn : mesh->ne);
+    mesh->weight = (double*)calloc(sizeof(double) * datalen * cfg->srcnum, cfg->maxgate);
+
+    if (cfg->method != rtBLBadouelGrid && cfg->unitinmm != 1.f) {
+        for (i = 1; i <= mesh->prop; i++) {
+            mesh->med[i].mus *= cfg->unitinmm;
+            mesh->med[i].mua *= cfg->unitinmm;
+        }
+    }
+
+    /*make medianum+1 the same as medium 0*/
+    if (cfg->isextdet) {
+        mesh->med = (medium*)realloc(mesh->med, sizeof(medium) * (mesh->prop + 2));
+        memcpy(mesh->med + mesh->prop + 1, mesh->med, sizeof(medium));
+
+        for (i = 0; i < mesh->ne; i++) {
+            if (mesh->type[i] == -2) {
+                mesh->type[i] = mesh->prop + 1;
+            }
+        }
+    }
 }
