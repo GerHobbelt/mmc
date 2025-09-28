@@ -38,6 +38,9 @@ jobs:
         shell: bash
         run: |
           git submodule update --init --remote .
+          cd src/pybind11
+          git fetch --tags
+          git checkout v3.0.0
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
