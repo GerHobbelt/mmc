@@ -14,7 +14,7 @@ jobs:
     name: Build All
     strategy:
       matrix:
-        os: [ubuntu-22.04, ubuntu-24.04, macos-13, macos-14, windows-2022]
+        os: [ubuntu-22.04, ubuntu-24.04, macos-15-intel, macos-14, windows-2022]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -28,7 +28,7 @@ jobs:
         if: ${{ runner.os == 'Linux' && matrix.os != 'ubuntu-24.04' }}
         run: |
           sudo add-apt-repository -s "deb [arch=amd64] http://archive.ubuntu.com/ubuntu focal main universe"
-          sudo apt-get update && sudo apt-get install -y ocl-icd-libopencl1 opencl-headers ocl-icd-opencl-dev liboctave-dev gcc-7 g++-7 upx-ucl pocl-opencl-icd
+          sudo apt-get update && sudo apt-get install -y ocl-icd-libopencl1 opencl-headers ocl-icd-opencl-dev liboctave-dev gcc-7 g++-7 gcc-9 g++-9 upx-ucl pocl-opencl-icd
       - name: Install dependencies (Linux only)
         if: ${{ matrix.os == 'ubuntu-24.04' }}
         run: |
@@ -42,7 +42,7 @@ jobs:
       - name: Install dependencies (MacOS only)
         if: ${{ runner.os == 'macOS' }}
         run: |
-          brew install octave
+          brew install octave gcc@12
           #brew install upx
           if [[ "$RUNNER_ARCH" == "ARM64" ]]; then
             echo 'OMPONLY=omp' >> $GITHUB_ENV
@@ -179,7 +179,7 @@ jobs:
             zip -FSr --symlink packages/mmclab-${{ env.RELEASE_TAG }}.zip mmclab
           fi
       - name: Upload mmclab package
-        if: ${{ matrix.os == 'ubuntu-22.04' || matrix.os == 'macos-13' || matrix.os == 'macos-14' || matrix.os == 'windows-2022' }}
+        if: ${{ matrix.os == 'ubuntu-22.04' || matrix.os == 'macos-15-intel' || matrix.os == 'macos-14' || matrix.os == 'windows-2022' }}
         uses: actions/upload-artifact@v4
         with:
           name: all-mmclab-packages-${{ env.RELEASE_TAG }}
@@ -194,12 +194,13 @@ jobs:
             upx -9 mmc/bin/* || true
           fi
           if [[ "$RUNNER_OS" == "Windows" ]]; then
+            rm -rf "$PWD/octave"
             7z a -tzip mmc/packages/mmc-${{ env.RELEASE_TAG }}.zip mmc -xr!mmc/packages
           else
             zip -FSr --symlink mmc/packages/mmc-${{ env.RELEASE_TAG }}.zip mmc -x 'mmc/packages*'
           fi
       - name: Upload mmc package
-        if: ${{ matrix.os == 'ubuntu-22.04' || matrix.os == 'macos-13' || matrix.os == 'macos-14' || matrix.os == 'windows-2022' }}
+        if: ${{ matrix.os == 'ubuntu-22.04' || matrix.os == 'macos-15-intel' || matrix.os == 'macos-14' || matrix.os == 'windows-2022' }}
         uses: actions/upload-artifact@v4
         with:
           name: all-mmc-packages-${{ env.RELEASE_TAG }}

@@ -111,12 +111,16 @@ void mmc_run_cl(mcconfig* cfg, tetmesh* mesh, raytracer* tracer) {
     float4* propdet;
     double energytot = 0.0, energyesc = 0.0;
 
-    MCXParam param = {{{cfg->srcpos.x, cfg->srcpos.y, cfg->srcpos.z}}, {{cfg->srcdir.x, cfg->srcdir.y, cfg->srcdir.z}},
+    MCXParam param = {{{cfg->srcparam1.x, cfg->srcparam1.y, cfg->srcparam1.z, cfg->srcparam1.w}},
+        {{cfg->srcparam2.x, cfg->srcparam2.y, cfg->srcparam2.z, cfg->srcparam2.w}},
+        {{cfg->crop0.x, cfg->crop0.y, cfg->crop0.z, cfg->crop0.w}},
+        {{cfg->bary0.x, cfg->bary0.y, cfg->bary0.z, cfg->bary0.w}},
+        {{cfg->srcpos.x, cfg->srcpos.y, cfg->srcpos.z}},
+        {{cfg->srcdir.x, cfg->srcdir.y, cfg->srcdir.z}},
+        {{mesh->nmin.x, mesh->nmin.y, mesh->nmin.z}},
         cfg->tstart, cfg->tend, (uint)cfg->isreflect, (uint)cfg->issavedet, (uint)cfg->issaveexit,
         (uint)cfg->ismomentum, (uint)cfg->isatomic, (uint)cfg->isspecular, 1.f / cfg->tstep, cfg->minenergy,
         cfg->maxdetphoton, mesh->prop, cfg->detnum, (uint)cfg->voidtime, (uint)cfg->srctype,
-        {{cfg->srcparam1.x, cfg->srcparam1.y, cfg->srcparam1.z, cfg->srcparam1.w}},
-        {{cfg->srcparam2.x, cfg->srcparam2.y, cfg->srcparam2.z, cfg->srcparam2.w}},
         cfg->issaveref, cfg->maxgate, (uint)cfg->debuglevel, detreclen, cfg->outputtype, mesh->elemlen,
         cfg->mcmethod, cfg->method, 1.f / cfg->steps.x,
 #if defined(MMC_USE_SSE) || defined(USE_OPENCL)
@@ -124,9 +128,7 @@ void mmc_run_cl(mcconfig* cfg, tetmesh* mesh, raytracer* tracer) {
 #else
         0.f,
 #endif
-        mesh->nn, mesh->ne, mesh->nf, {{mesh->nmin.x, mesh->nmin.y, mesh->nmin.z}}, cfg->nout,
-        cfg->roulettesize, cfg->srcnum, {{cfg->crop0.x, cfg->crop0.y, cfg->crop0.z, cfg->crop0.w}},
-        mesh->srcelemlen, {{cfg->bary0.x, cfg->bary0.y, cfg->bary0.z, cfg->bary0.w}},
+        mesh->nn, mesh->ne, mesh->nf, cfg->nout, cfg->roulettesize, cfg->srcnum, mesh->srcelemlen,
         cfg->e0, cfg->isextdet, (meshlen / cfg->srcnum), (mesh->prop + 1 + cfg->isextdet) + cfg->detnum,
         (MIN((MAX_PROP - param.maxpropdet), ((mesh->ne) << 2)) >> 2), /*max count of elem normal data in const mem*/
         cfg->issaveseed, cfg->seed, cfg->maxjumpdebug
@@ -447,7 +449,6 @@ void mmc_run_cl(mcconfig* cfg, tetmesh* mesh, raytracer* tracer) {
         FPARAM_TO_MACRO(opt, param, dstep);
         IPARAM_TO_MACRO(opt, param, e0);
         IPARAM_TO_MACRO(opt, param, elemlen);
-        FPARAM_TO_MACRO(opt, param, focus);
         IPARAM_TO_MACRO(opt, param, framelen);
         IPARAM_TO_MACRO(opt, param, isextdet);
         IPARAM_TO_MACRO(opt, param, ismomentum);
@@ -477,6 +478,16 @@ void mmc_run_cl(mcconfig* cfg, tetmesh* mesh, raytracer* tracer) {
         IPARAM_TO_MACRO(opt, param, detnum);
         IPARAM_TO_MACRO(opt, param, issaveseed);
         IPARAM_TO_MACRO(opt, param, nf);
+
+        if (param.focus != param.focus) {
+            snprintf(opt + strlen(opt), MAX_JIT_OPT_LEN - strlen(opt) - 1, " -Dgcfgfocus=NAN");
+        } else if (param.focus == INFINITY) {
+            snprintf(opt + strlen(opt), MAX_JIT_OPT_LEN - strlen(opt) - 1, " -Dgcfgfocus=INFINITY");
+        } else if (param.focus == -INFINITY) {
+            snprintf(opt + strlen(opt), MAX_JIT_OPT_LEN - strlen(opt) - 1, " -Dgcfgfocus=-INFINITY");
+        } else {
+            FPARAM_TO_MACRO(opt, param, focus);
+        }
     }
 
     MMC_FPRINTF(cfg->flog, "Building kernel with option: %s\n", opt);

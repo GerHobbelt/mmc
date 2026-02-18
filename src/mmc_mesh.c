@@ -528,7 +528,7 @@ void mesh_loadmedia(tetmesh* mesh, mcconfig* cfg) {
         memcpy(mesh->med, cfg->prop, sizeof(medium) * cfg->medianum);
     }
 
-    if (cfg->method != rtBLBadouelGrid && cfg->unitinmm != 1.f) {
+    if (cfg->unitinmm != 1.f) {
         for (i = 1; i <= mesh->prop; i++) {
             mesh->med[i].mus *= cfg->unitinmm;
             mesh->med[i].mua *= cfg->unitinmm;
@@ -1210,19 +1210,6 @@ void tracer_prep(raytracer* tracer, mcconfig* cfg) {
                 tracer->mesh->faceroi[i << 2] = -count;    // number -1 to -4 indicates how many faces have ROIs
             }
         }
-
-        for (i = 0; i < ne; i++) {
-            if (fabs(tracer->mesh->faceroi[i << 2]) < EPS) { // if I don't have roi
-                for (j = 0; j < tracer->mesh->elemlen; j++) { // loop over my neighbors
-                    int id = tracer->mesh->facenb[i * tracer->mesh->elemlen + j]; // loop over neighboring elements
-
-                    if (id > 0 && fabs(tracer->mesh->faceroi[(id - 1) << 2]) > EPS) { // if I don't have roi, but neighbor has, set ref id as -elemid-4, only handle 1 roi neighbor case
-                        tracer->mesh->faceroi[i << 2] = -id - 4;
-                        break;
-                    }
-                }
-            }
-        }
     }
 
     // loop over each external surface triangle (facenb[]==0) and sequentially number them as negative integer
@@ -1569,12 +1556,7 @@ void mesh_savedetphoton(float* ppath, void* seeds, int count, int seedbyte, mcco
         MESH_ERROR("can not open history file to write");
     }
 
-    cfg->his.unitinmm = 1.f;
-
-    if (cfg->method != rtBLBadouelGrid) {
-        cfg->his.unitinmm = cfg->unitinmm;
-    }
-
+    cfg->his.unitinmm = cfg->unitinmm;
     cfg->his.srcnum = cfg->srcnum;
     cfg->his.detnum = cfg->detnum;
 
@@ -1628,7 +1610,7 @@ void mesh_getdetimage(float* detmap, float* ppath, int count, mcconfig* cfg, tet
     int xsize = cfg->detparam1.w;
     int ysize = cfg->detparam2.w;
     int i, j, xindex, yindex, ntg, offset;
-    float unitinmm = (cfg->method != rtBLBadouelGrid) ? cfg->his.unitinmm : 1.f;
+    float unitinmm = cfg->his.unitinmm;
 
     float xloc, yloc, weight, path;
 
@@ -1949,7 +1931,7 @@ void mesh_validate(tetmesh* mesh, mcconfig* cfg) {
     datalen = (cfg->method == rtBLBadouelGrid) ? cfg->crop0.z : ( (cfg->basisorder) ? mesh->nn : mesh->ne);
     mesh->weight = (double*)calloc(sizeof(double) * datalen * cfg->srcnum, cfg->maxgate);
 
-    if (cfg->method != rtBLBadouelGrid && cfg->unitinmm != 1.f) {
+    if (cfg->unitinmm != 1.f) {
         for (i = 1; i <= mesh->prop; i++) {
             mesh->med[i].mus *= cfg->unitinmm;
             mesh->med[i].mua *= cfg->unitinmm;
