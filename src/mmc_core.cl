@@ -1018,7 +1018,7 @@ __device__ float reflectray(__constant MCXParam* gcfg, float3* c0, int* oldeid, 
             *c0 += (FL3(-2.f * Icos)) * pnorm;
             //if(GPU_PARAM(gcfg,debuglevel)&dlReflect) GPUDEBUG(("R %f %f %f %d %d %f\n",c0->x,c0->y,c0->z,*eid,*oldeid,Rtotal));
             *eid = *oldeid; /*stay with the current element*/
-        } else if (GPU_PARAM(gcfg, isspecular) == 2 && *eid == 0) {
+        } else if ((GPU_PARAM(gcfg, isspecular) == 2) * (*eid == 0)) {
             // if do transmission, but next neighbor is 0, terminate
         } else {                             /*do transmission*/
             *c0 += (FL3(-Icos)) * pnorm;
@@ -1381,7 +1381,7 @@ __device__ void launchnewphoton(__constant MCXParam* gcfg, ray* r, __global FLOA
             ang = acos(2.f * rand_uniform01(ran) - 1.f); //sine distribution
             MCX_SINCOS(ang, stheta, ctheta);
             rotatevector(&(r->vec), stheta, ctheta, sphi, cphi);
-        } else if (GPU_PARAM(gcfg, focus) < 0.f && isinf(GPU_PARAM(gcfg, focus))) { // lambertian (cosine distribution) if focal length is -inf
+        } else if ((GPU_PARAM(gcfg, focus) < 0.f) * (isinf(GPU_PARAM(gcfg, focus)))) { // lambertian (cosine distribution) if focal length is -inf
             float ang, stheta, ctheta, sphi, cphi;
             ang = TWO_PI * rand_uniform01(ran); //next arimuth angle
             MCX_SINCOS(ang, sphi, cphi);
@@ -1494,9 +1494,6 @@ __device__ void onephoton(unsigned int id, __local float* ppath, __constant MCXP
 #endif
 
     clearpath(ppath, (GPU_PARAM(gcfg, reclen) + (GPU_PARAM(gcfg, srcnum) > 1) * GPU_PARAM(gcfg, srcnum)));
-    clearpath(energytot, GPU_PARAM(gcfg, srcnum));
-    clearpath(energyesc, GPU_PARAM(gcfg, srcnum));
-
     r.photonid = id;
 
 #if defined(MCX_SAVE_SEED) || defined(__NVCC__)
@@ -1722,7 +1719,7 @@ __device__ void onephoton(unsigned int id, __local float* ppath, __constant MCXP
         //if(GPU_PARAM(gcfg,debuglevel)&dlMove)
         GPUDEBUG(("M %f %f %f %d %u %e\n", r.p0.x, r.p0.y, r.p0.z, r.eid, id, r.slen));
 
-        if (GPU_PARAM(gcfg, minenergy) > 0.f && r.weight < GPU_PARAM(gcfg, minenergy) && (gcfg->tend - gcfg->tstart)*GPU_PARAM(gcfg, Rtstep) <= 1.f) { /*Russian Roulette*/
+        if ((GPU_PARAM(gcfg, minenergy) > 0.f) * (r.weight < GPU_PARAM(gcfg, minenergy)) * ((gcfg->tend - gcfg->tstart)*GPU_PARAM(gcfg, Rtstep) <= 1.f)) { /*Russian Roulette*/
             if (rand_do_roulette(ran)*GPU_PARAM(gcfg, roulettesize) <= 1.f) {
                 r.weight *= GPU_PARAM(gcfg, roulettesize);
                 //if(GPU_PARAM(gcfg,debuglevel)&dlWeight)
@@ -1788,6 +1785,9 @@ __kernel void mmc_main_loop(const int nphoton, const int ophoton,
     if (GPU_PARAM(gcfg, seed) != SEED_FROM_FILE) {
         gpu_rng_init(t, n_seed, idx);
     }
+
+    clearpath(sharedmem + get_local_id(0) * GPU_PARAM(gcfg, srcnum), GPU_PARAM(gcfg, srcnum));
+    clearpath(sharedmem + (get_local_size(0) + get_local_id(0)) * GPU_PARAM(gcfg, srcnum), GPU_PARAM(gcfg, srcnum));
 
     /*launch photons*/
     for (int i = 0; i < nphoton + (idx < ophoton); i++) {

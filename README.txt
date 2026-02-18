@@ -6,7 +6,7 @@
 
 *Author:  Qianqian Fang <q.fang at neu.edu>
 *License: GNU General Public License version 3 (GPL v3), see License.txt
-*Version: 2.8.0 (v2025.9, Popcorn)
+*Version: 2.8.0 (v2025.10, Bubble Tea)
 *URL:     https://mcx.space/mmc
 
 ---------------------------------------------------------------------
@@ -19,19 +19,22 @@ Table of Content:
 
 == # What's New ==
 
-MMC v2025.9 (2.8.0) is a maintenance release with multiple bug fixes and new features. It is highly
+MMC v2025.10 (2.8.0) is a maintenance release with multiple bug fixes and new features. It is highly
 recommended to upgrade for all users.
 
-MMC v2025.9 adds the below key features
+MMC v2025.10 adds the below key features
 
 * new Python module - pmmc (`pip install pmmc`)
 * pmmc supports Apple silicon
 * pmmc integrates with pyiso2mesh (`pip install iso2mesh`)
 * support focal length via `cfg.srcdir(4)`, fix #108
 * support isotropic (`cfg.srcdir(4)=nan`) and Lambertian launch (`cfg.srcdir(4)=-inf`)
+* make implicit MMC (immc) available on OpenMP-only builds, such as Apple silicon (where SSE is not supported)
+* enable level-3 optimization (`--optlevel 3`) by default, accelerating simulations by 30%-100%
 
 this release also fixed a list of bugs, including
 
+* fix a critical-level bug related to fluence normalization - affect all simulations starting v2025
 * fix a "photon-leakage" bug in implicit MMC (immc) #76
 * fix the 2nd-neighboring element search in implicit MMC (immc)
 * fix incorrect node passing to OpenCL kernel, fix #109
@@ -41,6 +44,22 @@ this release also fixed a list of bugs, including
 
 The full changelog is listed below
 
+* 2025-10-20 [ae42a8c] [pmmc] bump version to 0.3.6 to include fix to #113
+* 2025-10-20 [4be1227] [bug] add missing macros after enabling optlevel 3, fix #113
+* 2025-10-12 [c113625] [deploy] fix octave 5.2 opencl not linked bug, fix command
+* 2025-10-12 [6acfb54] [deploy] fix octave 5.2 opencl not linked bug, need to set LFLAGS instead of LDFLAGS
+* 2025-10-11 [36c381d] [deploy] use LIBOPENCL for opencl library
+* 2025-10-09 [904fd93] [deploy] fix octave mex file missing libOpenCL on older Linux
+* 2025-10-06 [8d170a6] [release] prepare release for v2025.10
+* 2025-10-02 [cc5179c] [doc] update doc for v2025.10, bump pmmc to 0.3.5
+* 2025-10-02 [7dd25d9] [bug] enable immc in omp only mode on Apple silicon, fix memory error when r->nexteid
+* 2025-10-02 [d21587a] [bug] build immc in omp mode without sse, such as on Apple silicon, result incorrect
+* 2025-10-02 [c2cbc3b] [amd] fix one more warning
+* 2025-10-02 [7f1b47e] [amd] remove jit warnings
+* 2025-10-02 [8d0c19d] [bug] critical bug fix - incorrect energytot and energyesc introduced in commit 072fafe4305cd3c2da78094b0622dc4c67267983 Oct 14 2024
+* 2025-10-01 [2f81f87] [clang] silence clang warnings, make optlevel 3 default with macros
+* 2025-09-29 [63b48a6] [bug] add the missing gcfg constants when using -o 4 optimization
+* 2025-09-27 [2649e36] [doc] update documentation for v2025.10
 * 2025-09-19 [74191ba] [ci] avoid using slow choco octave installation
 * 2025-09-15 [688c1ba] [feat] support focal length via cfg.srcdir(4), fix #108
 * 2025-08-25 [38f8e8a] [pmmc] bump version to 0.3.0 to include expanded mcx utils functions
@@ -194,7 +213,7 @@ in your publication.
 
 The latest release of MMC can be downloaded from the following URL:
 
-  http://mcx.space/#mmc
+  https://mcx.space/#mmc
 
 The development branch (not fully tested) of the code can be accessed 
 using Git. However this is not encouraged unless you are
@@ -369,7 +388,7 @@ The full command line options of MMC include the following:
 #Please visit our free scientific data sharing portal at https://neurojson.io/#
 # and consider sharing your public datasets in standardized JSON/JData format #
 ###############################################################################
-$Rev::      $v2024.2 $Date::                       $ by $Author::             $
+$Rev::      $v2025.10$Date::                       $ by $Author::             $
 ###############################################################################
 
 usage: mmc <param1> <param2> ...
@@ -803,7 +822,7 @@ In you are a user, please use our mmc-users mailing list to post
 questions or share experience regarding MMC. The mailing lists can be
 found from this link:
 
- http://mcx.space/#about
+ https://mcx.space/#about
 
 -------------------------------------------------------------------------------
 
@@ -958,9 +977,9 @@ Both filter files were significantly modified by Qianqian Fang.
 == # Reference ===
 
 [1] http://iso2mesh.sf.net  -- an image-based surface/volumetric mesh generator
-[2] http://mcx.sf.net       -- Monte Carlo eXtreme: a GPU-accelerated MC code
+[2] https://mcx.space       -- Monte Carlo eXtreme: a GPU-accelerated MC code
 [3] https://cygwin.com/setup-x86_64.exe
 [4] http://developer.apple.com/mac/library/releasenotes/DeveloperTools/RN-llvm-gcc/index.html
 [5] http://iso2mesh.sourceforge.net/cgi-bin/index.cgi?Doc/AddPath
-[6] http://mcx.sf.net/cgi-bin/index.cgi?MMC/Doc/FAQ#How_do_I_interpret_MMC_s_output_data
+[6] https://mcx.space/cgi-bin/index.cgi?MMC/Doc/FAQ#How_do_I_interpret_MMC_s_output_data
 [7] http://iso2mesh.sourceforge.net/cgi-bin/index.cgi?fun/qmeshcut
