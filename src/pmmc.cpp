@@ -173,8 +173,8 @@ void parse_config(const py::dict& user_cfg, mcconfig& mcx_config, tetmesh& mesh)
      * array (no string-literal handling like mmclab.cpp because pybind11
      * arrays are typed). */
     {
-        auto parse_multisrc_matrix = [&](const char* name, float4& dst_single,
-                                         float4 ExtraSrc::* dst_field, bool is_srcdir) {
+        auto parse_multisrc_matrix = [&](const char* name, float4 & dst_single,
+        float4 ExtraSrc::* dst_field, bool is_srcdir) {
             if (!user_cfg.contains(name)) {
                 return;
             }
@@ -203,6 +203,7 @@ void parse_config(const py::dict& user_cfg, mcconfig& mcx_config, tetmesh& mesh)
             }
 
             float* val = (float*)info.ptr;
+
             /* numpy passes f_style: linear index = col * nrows + row */
             for (int c = 0; c < ncols; c++) {
                 ((float*)(&dst_single))[c] = val[c * nrows + 0];
@@ -937,6 +938,86 @@ py::dict pmmc_interface(const py::dict& user_cfg) {
 
         /** Validate all input fields, and warn incompatible inputs */
         mmc_validate_config(&mcx_config, det_ps, dim_det_ps, seed_byte);
+
+        /** Build srcdata from detectors for adjoint / srcid=-2 mode BEFORE
+         *  mesh_validate runs.  mesh_validate allocates mesh.weight sized by
+         *  the final nsrcslots = max(srcnum, extrasrclen); doing the
+         *  detector-append later would leave mesh.weight under-sized for the
+         *  Ns+Nd slots the kernel ends up writing to, producing a heap
+         *  overflow at simulation end.  This matches mmclab.cpp's order:
+         *  build-srcdata first, validate second.
+         *
+         *  Convention (matches mmclab.cpp and mmc_validate_config):
+         *    slots 0..Ns-1        : forward sources (copy of cfg.srcpos)
+         *    slots Ns..Ns+Nd-1    : detector-as-adjoint sources
+         *
+         *  If the multi-source srcpos parser already populated cfg.srcdata
+         *  with M forward slots (cfg.extrasrclen == M), keep them and only
+         *  append Nd detectors.  Otherwise replicate cfg.srcpos/srcdir Ns
+         *  times (single-source / photon-sharing convention).
+         */
+        if ((MCX_IS_ADJOINT_TYPE(mcx_config.outputtype) || mcx_config.srcid == -2)
+                && mcx_config.detnum > 0 && mcx_config.detdir != nullptr) {
+            int Nd_pre = mcx_config.detnum;
+            int Ns_pre;
+            int already_populated_pre = (mcx_config.srcdata != nullptr && mcx_config.extrasrclen > 0);
+
+            if (already_populated_pre) {
+                Ns_pre = mcx_config.extrasrclen;
+                mcx_config.srcdata = (ExtraSrc*)realloc(mcx_config.srcdata, (Ns_pre + Nd_pre) * sizeof(ExtraSrc));
+                memset(mcx_config.srcdata + Ns_pre, 0, Nd_pre * sizeof(ExtraSrc));
+
+                /* Uniform per-slot launch weight (MCX parity, mcx_utils.c:1822, :1985-1986):
+                 * every slot launches with srcpos.w = 1 so the total simulated energy
+                 * equals N_photon. Matches mmclab.cpp adjoint setup. */
+                for (int is = 0; is < Ns_pre; is++) {
+                    if (mcx_config.srcdata[is].srcpos.w == 0.f) {
+                        mcx_config.srcdata[is].srcpos.w = 1.f;
+                    }
+                }
+            } else {
+                if (mcx_config.srcdata) {
+                    free(mcx_config.srcdata);
+                }
+
+                Ns_pre = (mcx_config.srcnum > 0) ? mcx_config.srcnum : 1;
+                mcx_config.srcdata = (ExtraSrc*)calloc(Ns_pre + Nd_pre, sizeof(ExtraSrc));
+
+                /* Slots 0..Ns-1: forward sources (replicate the single main source).
+                 * Uniform unit weight per slot (MCX parity); preserve cfg.srcdir.w
+                 * (focal length / lens parameter). Detector slots below honor
+                 * cfg.detdir.w. */
+                for (int is = 0; is < Ns_pre; is++) {
+                    mcx_config.srcdata[is].srcpos    = {mcx_config.srcpos.x, mcx_config.srcpos.y,
+                                                        mcx_config.srcpos.z, 1.f
+                                                       };
+                    mcx_config.srcdata[is].srcdir    = {mcx_config.srcdir.x, mcx_config.srcdir.y,
+                                                        mcx_config.srcdir.z, mcx_config.srcdir.w
+                                                       };
+                    mcx_config.srcdata[is].srcparam1 = mcx_config.srcparam1;
+                    mcx_config.srcdata[is].srcparam2 = mcx_config.srcparam2;
+                }
+            }
+
+            mcx_config.extrasrclen = Ns_pre + Nd_pre;
+
+            /* Slots Ns..Ns+Nd-1: detector-as-reversed-source, unit weight per slot. */
+            for (int id = 0; id < Nd_pre; id++) {
+                mcx_config.srcdata[Ns_pre + id].srcpos  = {mcx_config.detpos[id].x, mcx_config.detpos[id].y,
+                                                           mcx_config.detpos[id].z, 1.f
+                                                          };
+                mcx_config.srcdata[Ns_pre + id].srcdir  = {mcx_config.detdir[id].x, mcx_config.detdir[id].y,
+                                                           mcx_config.detdir[id].z, mcx_config.detdir[id].w
+                                                          };
+                mcx_config.srcdata[Ns_pre + id].srcparam1 = {mcx_config.detpos[id].w, 0.f, 0.f, 0.f};
+                mcx_config.srcdata[Ns_pre + id].srcparam2 = {0.f, 0.f, 0.f, 0.f};
+            }
+
+            if (MCX_IS_ADJOINT_TYPE(mcx_config.outputtype)) {
+                mcx_config.srcid = -1;
+            }
+        }
+
         mesh_validate(&mesh, &mcx_config);
 
         hostdetreclen = (2 + ((mcx_config.ismomentum) > 0)) * mesh.prop + (mcx_config.issaveexit > 0) * 6 + 2;
@@ -965,68 +1046,8 @@ py::dict pmmc_interface(const py::dict& user_cfg) {
 
         mesh_srcdetelem(&mesh, &mcx_config);
 
-        /** Build srcdata from detectors for adjoint / srcid=-2 mode.
-         *  Convention (matches mmclab.cpp and mmc_validate_config):
-         *    slots 0..Ns-1        : forward sources
-         *    slots Ns..Ns+Nd-1    : detector-as-adjoint sources
-         *  If the multi-source srcpos parser already populated cfg.srcdata
-         *  with M forward slots (cfg.extrasrclen == M), keep them and only
-         *  append Nd detectors. Otherwise replicate cfg.srcpos cfg.srcnum
-         *  times (single-source / photon-sharing convention).
-         */
-        if ((MCX_IS_ADJOINT_TYPE(mcx_config.outputtype) || mcx_config.srcid == -2)
-                && mcx_config.detnum > 0 && mcx_config.detdir != nullptr) {
-            int Nd = mcx_config.detnum;
-            int Ns;
-            int already_populated = (mcx_config.srcdata != nullptr && mcx_config.extrasrclen > 0);
-
-            if (already_populated) {
-                Ns = mcx_config.extrasrclen;
-                mcx_config.srcdata = (ExtraSrc*)realloc(mcx_config.srcdata, (Ns + Nd) * sizeof(ExtraSrc));
-                memset(mcx_config.srcdata + Ns, 0, Nd * sizeof(ExtraSrc));
-
-                for (int is = 0; is < Ns; is++) {
-                    if (mcx_config.srcdata[is].srcpos.w == 0.f) {
-                        mcx_config.srcdata[is].srcpos.w = 1.f / Ns;
-                    }
-                }
-            } else {
-                if (mcx_config.srcdata) {
-                    free(mcx_config.srcdata);
-                }
-
-                Ns = (mcx_config.srcnum > 0) ? mcx_config.srcnum : 1;
-                mcx_config.srcdata = (ExtraSrc*)calloc(Ns + Nd, sizeof(ExtraSrc));
-
-                for (int is = 0; is < Ns; is++) {
-                    mcx_config.srcdata[is].srcpos    = {mcx_config.srcpos.x, mcx_config.srcpos.y,
-                                                        mcx_config.srcpos.z, 1.f / Ns
-                                                       };
-                    mcx_config.srcdata[is].srcdir    = {mcx_config.srcdir.x, mcx_config.srcdir.y,
-                                                        mcx_config.srcdir.z, 0.f
-                                                       };
-                    mcx_config.srcdata[is].srcparam1 = mcx_config.srcparam1;
-                    mcx_config.srcdata[is].srcparam2 = mcx_config.srcparam2;
-                }
-            }
-
-            mcx_config.extrasrclen = Ns + Nd;
-
-            for (int id = 0; id < Nd; id++) {
-                mcx_config.srcdata[Ns + id].srcpos  = {mcx_config.detpos[id].x, mcx_config.detpos[id].y,
-                                                       mcx_config.detpos[id].z, 1.f / Nd
-                                                      };
-                mcx_config.srcdata[Ns + id].srcdir  = {mcx_config.detdir[id].x, mcx_config.detdir[id].y,
-                                                       mcx_config.detdir[id].z, mcx_config.detdir[id].w
-                                                      };
-                mcx_config.srcdata[Ns + id].srcparam1 = {mcx_config.detpos[id].w, 0.f, 0.f, 0.f};
-                mcx_config.srcdata[Ns + id].srcparam2 = {0.f, 0.f, 0.f, 0.f};
-            }
-
-            if (MCX_IS_ADJOINT_TYPE(mcx_config.outputtype)) {
-                mcx_config.srcid = -1;
-            }
-        }
+        /* (detector-as-adjoint-source append now runs above, before
+         * mesh_validate, so mesh.weight is sized for the correct nsrcslots.) */
 
         if (mcx_config.isgpuinfo == 0) {
             mmc_prep(&mcx_config, &mesh, &tracer);
