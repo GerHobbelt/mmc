@@ -3748,9 +3748,10 @@ void mcx_prep(mcconfig* cfg) {
 
     /**
      * Append detectors as reversed sources for adjoint / srcid=-2 mode.
-     * In the mex containers (mmclab/pmmc), this is handled in the host wrapper
-     * before mmc_prep is called, in which case cfg->srcdata is already populated;
-     * we detect that and skip to avoid double-appending.
+     * In the mex containers (mmclab/pmmc), the host wrapper builds srcdata
+     * BEFORE mmc_prep is called, in which case cfg->srcdata is already
+     * populated; we detect that and skip to avoid double-appending. The
+     * standalone mmc binary relies on this block.
      *
      * Convention (matches mmclab.cpp / pmmc.cpp):
      *   srcdata[0..Ns-1]        : forward sources (copy of cfg->srcpos/srcdir)

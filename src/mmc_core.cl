@@ -1361,9 +1361,13 @@ __device__ void launchnewphoton(__constant MCXParam* gcfg, ray* r, __global FLOA
      *   srcid >  0  : launch only from srcdata[srcid-1] (1-based selector; matches mcx parity).
      *                 Field buffer collapses to one slot, so r->posidx is forced to 0.
      */
-    if (GPU_PARAM(gcfg, extrasrclen) > 0
-            && (GPU_PARAM(gcfg, srcid) < 0
-                || (GPU_PARAM(gcfg, srcid) > 0 && GPU_PARAM(gcfg, srcid) <= GPU_PARAM(gcfg, extrasrclen)))) {
+    /* Use bitwise & / | (rather than logical && / ||) so the OpenCL JIT
+     * doesn't warn when GPU_PARAM(gcfg, srcid) and ...extrasrclen are
+     * constant-folded macros - same convention as the omega/seed/srctype
+     * guards elsewhere in this file. */
+    if ((GPU_PARAM(gcfg, extrasrclen) > 0)
+            & (((GPU_PARAM(gcfg, srcid) < 0))
+               | ((GPU_PARAM(gcfg, srcid) > 0) & (GPU_PARAM(gcfg, srcid) <= GPU_PARAM(gcfg, extrasrclen))))) {
         unsigned int slot;            /* slot index into srcdata[] (source geometry) */
         unsigned int outslot;         /* slot index into field buffer (output) */
 

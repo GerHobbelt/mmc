@@ -547,7 +547,12 @@ void mmc_run_cl(mcconfig* cfg, tetmesh* mesh, raytracer* tracer) {
     // get the details on the error, and store it in buffer
     clGetProgramBuildInfo(mcxprogram, devices[0], CL_PROGRAM_BUILD_LOG, 0, NULL, &len);
 
-    if (len > 0) {
+    /* Print the OpenCL build log only when the build failed or when verbose
+     * timing/debug output is requested (dlTime). NVIDIA's OpenCL compiler
+     * emits informational "Function X is a kernel, so overriding noinline"
+     * lines on every successful build; those would otherwise clutter every
+     * mmclab run. Real build errors still surface via mcx_error below. */
+    if (len > 0 && (status != CL_SUCCESS || (cfg->debuglevel & dlTime))) {
         char* msg;
         int i;
         msg = (char*)calloc(len, 1);

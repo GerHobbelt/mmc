@@ -261,35 +261,61 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
             mesh_srcdetelem(&mesh, &cfg);
 
             /** Build srcdata from detectors for adjoint / srcid=-2 mode.
-             *  The field buffer uses nsrcslots = srcnum + detnum slots:
-             *    Slots 0..srcnum-1        : forward source photons (phi_src)
-             *    Slots srcnum..srcnum+detnum-1 : detector-as-source photons (phi_det)
+             *  The field buffer uses nsrcslots = Ns + detnum slots:
+             *    Slots 0..Ns-1                : forward source photons (phi_src)
+             *    Slots Ns..Ns+detnum-1        : detector-as-source photons (phi_det)
              *  The adjoint Jacobian kernel then computes J[vox,s,d] = phi_src[s] * phi_det[d].
              *  srcid==-2 builds the same slot layout for forward fluence only (no Jacobian).
+             *
+             *  Two routes feed Ns:
+             *    (a) cfg.srcpos was an Mx{3,4} matrix -> the multi-source srcpos parser
+             *        already populated cfg.srcdata with M forward slots and set
+             *        cfg.extrasrclen = M. Keep those slots and only append Nd detectors.
+             *    (b) cfg.srcpos was a single row -> srcdata is unpopulated. Replicate
+             *        the single source cfg.srcnum times as before (single-source-with-
+             *        photon-sharing convention).
              */
             if ((MCX_IS_ADJOINT_TYPE(cfg.outputtype) || cfg.srcid == -2)
                     && cfg.detnum > 0 && cfg.detdir != NULL) {
-                if (cfg.srcdata) {
-                    free(cfg.srcdata);
+                int Nd = cfg.detnum;
+                int Ns;
+                int already_populated = (cfg.srcdata != NULL && cfg.extrasrclen > 0);
+
+                if (already_populated) {
+                    Ns = cfg.extrasrclen;
+                    cfg.srcdata = (ExtraSrc*)realloc(cfg.srcdata, (Ns + Nd) * sizeof(ExtraSrc));
+                    memset(cfg.srcdata + Ns, 0, Nd * sizeof(ExtraSrc));
+
+                    /* Fill in missing per-slot weights so each forward source gets
+                     * 1/Ns of the photon budget (the multi-source srcpos parser leaves
+                     * .w = 0 when user only passes a 3-column position). */
+                    for (int is = 0; is < Ns; is++) {
+                        if (cfg.srcdata[is].srcpos.w == 0.f) {
+                            cfg.srcdata[is].srcpos.w = 1.f / Ns;
+                        }
+                    }
+                } else {
+                    if (cfg.srcdata) {
+                        free(cfg.srcdata);
+                    }
+
+                    Ns = cfg.srcnum;   /* photon-sharing replication count */
+                    cfg.srcdata = (ExtraSrc*)calloc(Ns + Nd, sizeof(ExtraSrc));
+
+                    /* Slots 0..Ns-1: forward sources (replicate the single main source). */
+                    for (int is = 0; is < Ns; is++) {
+                        cfg.srcdata[is].srcpos    = {cfg.srcpos.x, cfg.srcpos.y,
+                                                     cfg.srcpos.z, 1.f / Ns
+                                                    };
+                        cfg.srcdata[is].srcdir    = {cfg.srcdir.x, cfg.srcdir.y,
+                                                     cfg.srcdir.z, 0.f
+                                                    };
+                        cfg.srcdata[is].srcparam1 = cfg.srcparam1;
+                        cfg.srcdata[is].srcparam2 = cfg.srcparam2;
+                    }
                 }
 
-                int Ns = cfg.srcnum;   /* number of forward source slots */
-                int Nd = cfg.detnum;   /* number of detector source slots */
                 cfg.extrasrclen = Ns + Nd;
-                cfg.srcdata = (ExtraSrc*)calloc(cfg.extrasrclen, sizeof(ExtraSrc));
-
-                /* Slots 0..Ns-1: forward sources (same position/direction as main source).
-                 * cfg.srcpos/srcdir are float4 (single source); only srcnum=1 is supported. */
-                for (int is = 0; is < Ns; is++) {
-                    cfg.srcdata[is].srcpos    = {cfg.srcpos.x, cfg.srcpos.y,
-                                                 cfg.srcpos.z, 1.f / Ns
-                                                };
-                    cfg.srcdata[is].srcdir    = {cfg.srcdir.x, cfg.srcdir.y,
-                                                 cfg.srcdir.z, 0.f
-                                                };
-                    cfg.srcdata[is].srcparam1 = cfg.srcparam1;
-                    cfg.srcdata[is].srcparam2 = cfg.srcparam2;
-                }
 
                 /* Slots Ns..Ns+Nd-1: detector-as-reversed-source */
                 for (int id = 0; id < Nd; id++) {

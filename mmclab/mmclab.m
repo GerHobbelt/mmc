@@ -35,6 +35,19 @@ function varargout = mmclab(varargin)
 %         option='opencl':  force using OpenCL (set cfg.gpuid=1 if not set)
 %                           instead of SSE on CPUs/GPUs that support OpenCL
 %
+%    if one defines USE_MCXCL in the MATLAB/Octave base workspace, mmclab
+%    inspects it before every call:
+%        USE_MCXCL = 1   (or unset)   default: run on the first GPU/device
+%        USE_MCXCL = 0                identical to the default for mmclab
+%                                      (mmc.mex is unified - no CUDA/OpenCL
+%                                      switch). Provided for mcxlabcl parity.
+%        USE_MCXCL = N  with |N| > 1  override cfg.gpuid with abs(N) so that
+%                                      every cfg in the input runs on device
+%                                      N (1-based, matches gpuinfo numbering).
+%                                      Useful for selecting one specific GPU
+%                                      on multi-GPU systems without editing
+%                                      every script's cfg.gpuid.
+%
 %
 %    cfg may contain the following fields:
 %
@@ -282,6 +295,19 @@ end
 
 if (isstruct(varargin{1}))
     for i = 1:length(varargin{1})
+        % USE_MCXCL = N with |N| > 1 in the base workspace selects the
+        % default device for every cfg in this call (parallel to
+        % mcxcl/mcxlabcl/mcxlabcl.m). USE_MCXCL = 0 / 1 leaves cfg.gpuid
+        % alone (gpuid stays at whatever the cfg sets, or the mex default).
+        % Keyed off the raw defaultocl rather than useopencl so that
+        % option='prep'/'preview'/'cuda' (which reset useopencl=0) still
+        % see the device override applied to the returned cfg.
+        if (defaultocl < 0)
+            varargin{1}(i).gpuid = -defaultocl;
+        elseif (defaultocl > 1)
+            varargin{1}(i).gpuid = defaultocl;
+        end
+
         castlist = {'srcpattern', 'srcpos', 'detpos', 'prop', 'workload', 'srcdir'};
         for j = 1:length(castlist)
             if (isfield(varargin{1}(i), castlist{j}))
