@@ -1814,15 +1814,22 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
             subitem = FIND_JSON_OBJ("Pos", "Optode.Source.Pos", src);
 
             if (subitem && cJSON_IsArray(subitem)) {
-                /* Multi-source: Pos can be a 2D array [[x,y,z,w],...]; first row is
-                 * cfg->srcpos, remaining rows populate cfg->srcdata[0..N-1]. */
+                /* Multi-source: Pos can be a 2D array [[x,y,z,w],...]; the first row
+                 * also populates cfg->srcpos (single-source fallback for any code
+                 * that reads it directly), and every row 0..N-1 is copied into
+                 * cfg->srcdata so the GPU kernel's multi-source dispatch can pick
+                 * any one of them via posidx. extrasrclen = N (total source count). */
+                int nrows = 1;
+
                 if (cJSON_IsArray(subitem->child)) {
-                    if (cfg->srcdata && cfg->extrasrclen != cJSON_GetArraySize(subitem) - 1) {
+                    nrows = cJSON_GetArraySize(subitem);
+
+                    if (cfg->srcdata && cfg->extrasrclen != nrows) {
                         MMC_ERROR(-1, "Length of sub-elements of Pos/Dir/Param1/Param2 must match");
                     }
 
                     if (cfg->srcdata == NULL) {
-                        cfg->extrasrclen = cJSON_GetArraySize(subitem) - 1;
+                        cfg->extrasrclen = nrows;
                     }
 
                     subitem = subitem->child;
@@ -1837,11 +1844,15 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
                 }
 
                 if (cfg->extrasrclen > 0) {
-                    int count = 0;
-
                     if (cfg->srcdata == NULL) {
                         cfg->srcdata = (ExtraSrc*)calloc(sizeof(ExtraSrc), cfg->extrasrclen);
                     }
+
+                    /* Copy row 0 into srcdata[0] so the kernel's multi-source dispatch
+                     * (which only reads srcdata, never cfg->srcpos) sees the main source. */
+                    cfg->srcdata[0].srcpos = cfg->srcpos;
+
+                    int count = 1;
 
                     while (subitem->next && count < cfg->extrasrclen) {
                         subitem = subitem->next;
@@ -1861,13 +1872,17 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
             subitem = FIND_JSON_OBJ("Dir", "Optode.Source.Dir", src);
 
             if (subitem && cJSON_IsArray(subitem)) {
+                int nrows = 1;
+
                 if (cJSON_IsArray(subitem->child)) {
-                    if (cfg->srcdata && cfg->extrasrclen != cJSON_GetArraySize(subitem) - 1) {
+                    nrows = cJSON_GetArraySize(subitem);
+
+                    if (cfg->srcdata && cfg->extrasrclen != nrows) {
                         MMC_ERROR(-1, "Length of sub-elements of Pos/Dir/Param1/Param2 must match");
                     }
 
                     if (cfg->srcdata == NULL) {
-                        cfg->extrasrclen = cJSON_GetArraySize(subitem) - 1;
+                        cfg->extrasrclen = nrows;
                     }
 
                     subitem = subitem->child;
@@ -1892,11 +1907,14 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
                 }
 
                 if (cfg->extrasrclen > 0) {
-                    int count = 0;
-
                     if (cfg->srcdata == NULL) {
                         cfg->srcdata = (ExtraSrc*)calloc(sizeof(ExtraSrc), cfg->extrasrclen);
                     }
+
+                    /* Row 0 also goes into srcdata[0]. */
+                    cfg->srcdata[0].srcdir = cfg->srcdir;
+
+                    int count = 1;
 
                     while (subitem->next && count < cfg->extrasrclen) {
                         subitem = subitem->next;
@@ -1936,13 +1954,17 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
             subitem = FIND_JSON_OBJ("Param1", "Optode.Source.Param1", src);
 
             if (subitem && cJSON_IsArray(subitem)) {
+                int nrows = 1;
+
                 if (cJSON_IsArray(subitem->child)) {
-                    if (cfg->srcdata && cfg->extrasrclen != cJSON_GetArraySize(subitem) - 1) {
+                    nrows = cJSON_GetArraySize(subitem);
+
+                    if (cfg->srcdata && cfg->extrasrclen != nrows) {
                         MMC_ERROR(-1, "Length of sub-elements of Pos/Dir/Param1/Param2 must match");
                     }
 
                     if (cfg->srcdata == NULL) {
-                        cfg->extrasrclen = cJSON_GetArraySize(subitem) - 1;
+                        cfg->extrasrclen = nrows;
                     }
 
                     subitem = subitem->child;
@@ -1963,11 +1985,12 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
                 }
 
                 if (cfg->extrasrclen > 0) {
-                    int count = 0;
-
                     if (cfg->srcdata == NULL) {
                         cfg->srcdata = (ExtraSrc*)calloc(sizeof(ExtraSrc), cfg->extrasrclen);
                     }
+
+                    cfg->srcdata[0].srcparam1 = cfg->srcparam1;
+                    int count = 1;
 
                     while (subitem->next && count < cfg->extrasrclen) {
                         subitem = subitem->next;
@@ -1993,13 +2016,17 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
             subitem = FIND_JSON_OBJ("Param2", "Optode.Source.Param2", src);
 
             if (subitem && cJSON_IsArray(subitem)) {
+                int nrows = 1;
+
                 if (cJSON_IsArray(subitem->child)) {
-                    if (cfg->srcdata && cfg->extrasrclen != cJSON_GetArraySize(subitem) - 1) {
+                    nrows = cJSON_GetArraySize(subitem);
+
+                    if (cfg->srcdata && cfg->extrasrclen != nrows) {
                         MMC_ERROR(-1, "Length of sub-elements of Pos/Dir/Param1/Param2 must match");
                     }
 
                     if (cfg->srcdata == NULL) {
-                        cfg->extrasrclen = cJSON_GetArraySize(subitem) - 1;
+                        cfg->extrasrclen = nrows;
                     }
 
                     subitem = subitem->child;
@@ -2020,11 +2047,12 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
                 }
 
                 if (cfg->extrasrclen > 0) {
-                    int count = 0;
-
                     if (cfg->srcdata == NULL) {
                         cfg->srcdata = (ExtraSrc*)calloc(sizeof(ExtraSrc), cfg->extrasrclen);
                     }
+
+                    cfg->srcdata[0].srcparam2 = cfg->srcparam2;
+                    int count = 1;
 
                     while (subitem->next && count < cfg->extrasrclen) {
                         subitem = subitem->next;

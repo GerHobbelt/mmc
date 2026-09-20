@@ -960,19 +960,48 @@ are more than what your have specified (%d), please use the --maxjumpdebug optio
 
             cfg->his.normalizer = sum_normalizer / cfg->srcnum; // average normalizer value for all simulated sources
 
-            /* For adjoint / multi-source mode, mesh_normalize only covers slots 0..srcnum-1
-             * in exportfield. Apply the same average normalizor to slots srcnum..extrasrclen-1.
-             * Works for both grid (datalen=crop0.z) and mesh (datalen=ne or nn) layouts. */
+            /* For adjoint / multi-source mode, mesh_normalize only writes to slots
+             * 0..srcnum-1 in exportfield (its indexing isn't slot-aware). For the
+             * remaining slots srcnum..extrasrclen-1, apply a per-slot normalizer that
+             * scales the slot-0 normalizer by w_0/w_k (the ratio of source weights),
+             * so slot k ends up expressed in fluence-per-unit-source-energy units
+             * regardless of whether srcdata[k].srcpos.w was 1/Ns, 1/Nd, or arbitrary.
+             * Falls back to the old avg_normalizor broadcast when srcdata isn't
+             * populated. */
             if (cfg->extrasrclen > cfg->srcnum && cfg->exportfield) {
                 double avg_normalizor = sum_normalizer / cfg->srcnum;
+                int mesh_basis1 = (cfg->method != rtBLBadouelGrid) && (cfg->basisorder != 0);
                 size_t datalen = (cfg->method == rtBLBadouelGrid)
                                  ? (size_t)cfg->crop0.z
                                  : (size_t)((cfg->basisorder) ? mesh->nn : mesh->ne);
                 size_t slot_stride = datalen * (size_t)cfg->maxgate;
+                double w0 = (cfg->srcdata) ? cfg->srcdata[0].srcpos.w : 0.0;
 
                 for (int slot = cfg->srcnum; slot < cfg->extrasrclen; slot++) {
-                    for (size_t ki = 0; ki < slot_stride; ki++) {
-                        cfg->exportfield[(size_t)slot * slot_stride + ki] *= avg_normalizor;
+                    double slot_normalizor = avg_normalizor;
+
+                    if (cfg->srcdata && w0 > 0.0 && cfg->srcdata[slot].srcpos.w > 0.0) {
+                        slot_normalizor = avg_normalizor * (w0 / cfg->srcdata[slot].srcpos.w);
+                    }
+
+                    /* mesh + basisorder=1: mesh_normalize divides slot 0 by nvol[j] per
+                     * node before applying its scalar normalizer; replicate that here. */
+                    if (mesh_basis1) {
+                        for (int t = 0; t < cfg->maxgate; t++) {
+                            for (int j = 0; j < (int)datalen; j++) {
+                                size_t idx = (size_t)slot * slot_stride + (size_t)t * datalen + j;
+
+                                if (mesh->nvol[j] > 0.f) {
+                                    cfg->exportfield[idx] /= mesh->nvol[j];
+                                }
+
+                                cfg->exportfield[idx] *= slot_normalizor;
+                            }
+                        }
+                    } else {
+                        for (size_t ki = 0; ki < slot_stride; ki++) {
+                            cfg->exportfield[(size_t)slot * slot_stride + ki] *= slot_normalizor;
+                        }
                     }
                 }
             }

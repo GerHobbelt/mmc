@@ -353,11 +353,16 @@ for i = 1:len
         error('cfg.srcdir field is missing');
     end
     if (~isfield(cfg(i), 'e0') || isempty(cfg(i).e0))
-        cfg(i).e0 = tsearchn(cfg(i).node, cfg(i).elem, cfg(i).srcpos);
+        % For multi-source (Mx{3,4} srcpos / srcdir), only the first row
+        % populates cfg.srcpos in the mex container; the remaining rows
+        % go into cfg.srcdata[] and are looked up per-photon at launch
+        % time inside the GPU kernel. Pass only the first 3 coordinates
+        % to tsearchn so the e0 hint is for the main source slot.
+        cfg(i).e0 = tsearchn(cfg(i).node, cfg(i).elem, cfg(i).srcpos(1, 1:3));
     end
     if ((isnan(cfg(i).e0) && (isfield(cfg(i), 'srctype') && strcmp(cfg(i).srctype, 'pencil'))) || ischar(cfg(i).e0))
         disp('searching initial element ...');
-        [cfg(i).srcpos, cfg(i).e0] = mmcraytrace(cfg(i).node, cfg(i).elem, cfg(i).srcpos, cfg(i).srcdir, cfg(i).e0);
+        [cfg(i).srcpos(1, 1:3), cfg(i).e0] = mmcraytrace(cfg(i).node, cfg(i).elem, cfg(i).srcpos(1, 1:3), cfg(i).srcdir(1, 1:3), cfg(i).e0);
     end
     if ((isfield(cfg(i), 'srctype') && strcmp(cfg(i).srctype, 'pattern')) && (ndims(cfg(i).srcpattern) == 2))
         cfg(i).srcpattern = reshape(cfg(i).srcpattern, ...

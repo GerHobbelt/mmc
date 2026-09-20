@@ -799,6 +799,40 @@ __device__ float branchless_badouel_raytet(ray* r, __constant MCXParam* gcfg, __
                 uint newidx = eid + tshift + src_slot_offset;
                 r->oldidx = (r->oldidx == ID_UNDEFINED) ? newidx : r->oldidx;
 
+                /* RF forward (omega>0, no seed-replay): apply complex Beer-Lambert over
+                 * this one Lmove step. The deposit fluence per step is
+                 *     ∫₀^L w₀ e^{-(mua+i ω n/c0) s} ds
+                 *         = (w₀ - w_new) / (mua + i ω n/c0)
+                 * matching the per-segment formula already in the rtBLBadouelGrid block. */
+                float bl_dep_im = 0.f;
+                float bl_dep_re_rf = 0.f;
+
+                if ((GPU_PARAM(gcfg, omega) > 0.f) & (GPU_PARAM(gcfg, seed) != SEED_FROM_FILE)) {
+                    float w0_re = currweight.f, w0_im = r->weight_im;
+                    float att_re = totalloss < 1.f ? (1.f - totalloss) : 1.f; /* exp(-mua*Lmove) */
+                    float phase  = GPU_PARAM(gcfg, omega) * prop.n * GPU_PARAM(gcfg, oneoverc0) * r->Lmove;
+                    float cphi, sphi;
+                    MCX_SINCOS(phase, sphi, cphi);
+                    /* w_new = w₀ * exp(-mua*Lmove) * exp(-i*phase) */
+                    float new_re = att_re * (w0_re * cphi + w0_im * sphi);
+                    float new_im = att_re * (-w0_re * sphi + w0_im * cphi);
+                    /* deposit = (w₀ - w_new) / (mua + i ω n/c0) */
+                    float dw_re = w0_re - new_re;
+                    float dw_im = w0_im - new_im;
+                    float a_im  = GPU_PARAM(gcfg, omega) * prop.n * GPU_PARAM(gcfg, oneoverc0);
+                    float a_mag2 = prop.mua * prop.mua + a_im * a_im;
+                    bl_dep_re_rf = (a_mag2 > 0.f) ? (dw_re * prop.mua + dw_im * a_im) / a_mag2
+                                   : (w0_re * r->Lmove);
+                    bl_dep_im    = (a_mag2 > 0.f) ? (dw_im * prop.mua - dw_re * a_im) / a_mag2
+                                   : (w0_im * r->Lmove);
+                    /* Replace the real-only ww with the matched complex Re(deposit), and
+                     * advance r->weight_im for the next step. r->weight (real) is already
+                     * att*real(rotation), match it. */
+                    ww = bl_dep_re_rf;
+                    r->weight    = new_re;
+                    r->weight_im = new_im;
+                }
+
                 if (newidx != r->oldidx) {
 #ifndef DO_NOT_SAVE
 
@@ -815,8 +849,18 @@ __device__ float branchless_badouel_raytet(ray* r, __constant MCXParam* gcfg, __
                                 }
                             }
 
+                            /* RF imag part lives at +2*crop0.w (matches rtBLBadouelGrid). */
+                            if ((GPU_PARAM(gcfg, omega) > 0.f) & (GPU_PARAM(gcfg, seed) != SEED_FROM_FILE)) {
+                                atomicadd(weight + r->oldidx + gcfg->crop0.w * 2, r->oldweight_im);
+                            }
+
 #else
                             weight[r->oldidx] += r->oldweight;
+
+                            if ((GPU_PARAM(gcfg, omega) > 0.f) & (GPU_PARAM(gcfg, seed) != SEED_FROM_FILE)) {
+                                weight[r->oldidx + gcfg->crop0.w * 2] += r->oldweight_im;
+                            }
+
 #endif
                         } else if (GPU_PARAM(gcfg, srctype) == stPattern) {
 
@@ -843,8 +887,10 @@ __device__ float branchless_badouel_raytet(ray* r, __constant MCXParam* gcfg, __
 #endif
                     r->oldidx = newidx;
                     r->oldweight = ww;
+                    r->oldweight_im = bl_dep_im;
                 } else {
-                    r->oldweight += ww;
+                    r->oldweight    += ww;
+                    r->oldweight_im += bl_dep_im;
                 }
 
 #ifndef DO_NOT_SAVE
@@ -864,8 +910,17 @@ __device__ float branchless_badouel_raytet(ray* r, __constant MCXParam* gcfg, __
                             }
                         }
 
+                        if ((GPU_PARAM(gcfg, omega) > 0.f) & (GPU_PARAM(gcfg, seed) != SEED_FROM_FILE)) {
+                            atomicadd(weight + newidx + gcfg->crop0.w * 2, r->oldweight_im);
+                        }
+
 #else
                         weight[newidx] += r->oldweight;
+
+                        if ((GPU_PARAM(gcfg, omega) > 0.f) & (GPU_PARAM(gcfg, seed) != SEED_FROM_FILE)) {
+                            weight[newidx + gcfg->crop0.w * 2] += r->oldweight_im;
+                        }
+
 #endif
                     } else if (GPU_PARAM(gcfg, srctype) == stPattern) {
 
@@ -888,7 +943,8 @@ __device__ float branchless_badouel_raytet(ray* r, __constant MCXParam* gcfg, __
 
                     }
 
-                    r->oldweight = 0.f;
+                    r->oldweight    = 0.f;
+                    r->oldweight_im = 0.f;
                 }
 
 #endif // for ifdef DO_NOT_SAVE
