@@ -392,7 +392,7 @@ int mmc_run_mp(mcconfig* cfg, tetmesh* mesh, raytracer* tracer) {
 #ifndef MCX_CONTAINER
 
         if (cfg->issaveexit) {
-            mesh_savedetphoton(cfg->exportdetected, (void*)(cfg->exportseed), cfg->detectedcount, (sizeof(RandType)*RAND_BUF_LEN), cfg);
+            mcx_savedetphoton(cfg->exportdetected, (void*)(cfg->exportseed), cfg->detectedcount, (sizeof(RandType)*RAND_BUF_LEN), cfg);
         }
 
 #endif
@@ -426,11 +426,13 @@ int mmc_run_mp(mcconfig* cfg, tetmesh* mesh, raytracer* tracer) {
     }
 
     if ((cfg->debuglevel & dlTraj) && cfg->parentid == mpStandalone && cfg->exportdebugdata) {
+        MMC_FPRINTF(cfg->flog, "saving trajectory data to file ...\t");
         cfg->his.colcount = MCX_DEBUG_REC_LEN;
         cfg->his.savedphoton = cfg->debugdatalen;
         cfg->his.totalphoton = cfg->nphoton;
         cfg->his.detected = 0;  // this flag tells mcx_savedetphoton that the data is trajectory
-        mesh_savedetphoton(cfg->exportdebugdata, NULL, cfg->debugdatalen, 0, cfg);
+        mcx_savedetphoton(cfg->exportdebugdata, NULL, cfg->debugdatalen, 0, cfg);
+        MMC_FPRINTF(cfg->flog, "saving trajectory data complete : %d ms\n\n", GetTimeMillis() - t0);
     }
 
 #endif

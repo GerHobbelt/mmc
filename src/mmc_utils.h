@@ -118,9 +118,11 @@ enum TRayHitType {htNone, htInOut, htOutIn, htNoHitIn, htNoHitOut};
 enum TROIType {rtNone, rtEdge, rtNode, rtFace};
 
 enum TBJData {JDB_mixed, JDB_nulltype, JDB_noop, JDB_true, JDB_false,
-              JDB_char, JDB_string, JDB_hp, JDB_int8, JDB_uint8, JDB_int16, JDB_int32,
-              JDB_int64, JDB_single, JDB_double, JDB_array, JDB_object, JDB_numtypes,
-              JDB_uint16 = 10, JDB_uint32, JDB_uint64
+              JDB_char, JDB_string, JDB_hp,
+              JDB_int8, JDB_uint8, JDB_int16, JDB_uint16,
+              JDB_int32, JDB_uint32, JDB_int64, JDB_uint64,
+              JDB_half, JDB_single, JDB_double,
+              JDB_array, JDB_object, JDB_numtypes
              };
 
 /***************************************************************************//**
@@ -302,6 +304,9 @@ typedef struct MMC_config {
     float* exportjacob;           /**<float buffer for adjoint Jacobian output (separate from RF imaginary fluence)*/
     ExtraSrc* srcdata;            /**<multi-source list for adjoint mode; length = extrasrclen*/
     int extrasrclen;              /**<number of entries in srcdata (>0 for adjoint/multi-source mode)*/
+    int srcid;                    /**<multi-source selector: 0=merge all (default), -1=run each slot separately,
+                                       -2=append detectors as adjoint sources without forcing adjoint output,
+                                       N>0=run only the N-th source*/
     double* energytot;             /**<total energy launched for each source, a buffer of length srcnum */
     double* energyesc;             /**<total energy escaped for each source, a buffer of length srcnum */
     unsigned int detectedcount;    /**<total number of detected photons*/
@@ -359,6 +364,7 @@ void mcx_cleargpuinfo(GPUInfo** gpuinfo);
 void mcx_convertcol2row(unsigned int** vol, uint3* dim);
 void mcx_convertcol2row4d(unsigned int** vol, uint4* dim);
 void mcx_savejdata(char* filename, mcconfig* cfg);
+void mcx_savedetphoton(float* ppath, void* seeds, int count, int seedbyte, mcconfig* cfg);
 int  mcx_jdataencode(void* vol,  int ndim, uint* dims, char* type, int byte, int zipid, void* obj, int isubj, int iscol, mcconfig* cfg);
 int  mcx_jdatadecode(void** vol, int* ndim, uint* dims, int maxdim, char** type, cJSON* obj, mcconfig* cfg);
 void mcx_convertrow2col(float* vol, uint3* dim);
@@ -367,6 +373,7 @@ void mcx_savebnii(void* vol, int ndim, uint* dims, float* voxelsize, char* name,
 void mcx_savefloatjnii(float* vol, int ndim, uint* dims, float* voxelsize, char* name, mcconfig* cfg);
 void mcx_savefloatbnii(float* vol, int ndim, uint* dims, float* voxelsize, char* name, mcconfig* cfg);
 void mcx_savejdet(float* ppath, void* seeds, uint count, int doappend, mcconfig* cfg);
+void mcx_savejdb(float* ppath, void* seeds, uint count, int doappend, mcconfig* cfg);
 void mcx_fflush(FILE* out);
 void mmc_validate_config(mcconfig* cfg, float* detps, int dimdetps[2], int seedbyte);
 

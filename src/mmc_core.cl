@@ -729,7 +729,10 @@ __device__ float branchless_badouel_raytet(ray* r, __constant MCXParam* gcfg, __
 
             if (GPU_PARAM(gcfg, method) == rtBLBadouel) {
 #endif
-                uint newidx = eid + tshift;
+                /* multi-source (adjoint) mode: offset newidx by source-slot × ne × maxgate */
+                uint src_slot_offset = (GPU_PARAM(gcfg, srcid) < 0) ?
+                                       (uint)(r->posidx) * GPU_PARAM(gcfg, ne) * GPU_PARAM(gcfg, maxgate) : 0u;
+                uint newidx = eid + tshift + src_slot_offset;
                 r->oldidx = (r->oldidx == ID_UNDEFINED) ? newidx : r->oldidx;
 
                 if (newidx != r->oldidx) {

@@ -843,24 +843,46 @@ py::dict pmmc_interface(const py::dict& user_cfg) {
 
         mesh_srcdetelem(&mesh, &mcx_config);
 
-        /** Build srcdata from detectors for adjoint mode */
-        if (MCX_IS_ADJOINT_TYPE(mcx_config.outputtype) && mcx_config.detnum > 0 && mcx_config.detdir != nullptr) {
+        /** Build srcdata from detectors for adjoint / srcid=-2 mode.
+         *  Convention (matches mmclab.cpp and mmc_validate_config):
+         *    slots 0..Ns-1        : forward sources (copy of cfg.srcpos/srcdir, srcnum>=1)
+         *    slots Ns..Ns+Nd-1    : detector-as-adjoint sources
+         */
+        if ((MCX_IS_ADJOINT_TYPE(mcx_config.outputtype) || mcx_config.srcid == -2)
+                && mcx_config.detnum > 0 && mcx_config.detdir != nullptr) {
             if (mcx_config.srcdata) {
                 free(mcx_config.srcdata);
             }
 
-            mcx_config.extrasrclen = mcx_config.detnum;
-            mcx_config.srcdata = (ExtraSrc*)calloc(mcx_config.detnum, sizeof(ExtraSrc));
+            int Ns = (mcx_config.srcnum > 0) ? mcx_config.srcnum : 1;
+            int Nd = mcx_config.detnum;
+            mcx_config.extrasrclen = Ns + Nd;
+            mcx_config.srcdata = (ExtraSrc*)calloc(mcx_config.extrasrclen, sizeof(ExtraSrc));
 
-            for (int id = 0; id < mcx_config.detnum; id++) {
-                mcx_config.srcdata[id].srcpos  = {mcx_config.detpos[id].x, mcx_config.detpos[id].y,
-                                                  mcx_config.detpos[id].z, 1.f / mcx_config.detnum
-                                                 };
-                mcx_config.srcdata[id].srcdir  = {mcx_config.detdir[id].x, mcx_config.detdir[id].y,
-                                                  mcx_config.detdir[id].z, mcx_config.detdir[id].w
-                                                 };
-                mcx_config.srcdata[id].srcparam1 = {mcx_config.detpos[id].w, 0.f, 0.f, 0.f};
-                mcx_config.srcdata[id].srcparam2 = {0.f, 0.f, 0.f, 0.f};
+            for (int is = 0; is < Ns; is++) {
+                mcx_config.srcdata[is].srcpos    = {mcx_config.srcpos.x, mcx_config.srcpos.y,
+                                                    mcx_config.srcpos.z, 1.f / Ns
+                                                   };
+                mcx_config.srcdata[is].srcdir    = {mcx_config.srcdir.x, mcx_config.srcdir.y,
+                                                    mcx_config.srcdir.z, 0.f
+                                                   };
+                mcx_config.srcdata[is].srcparam1 = mcx_config.srcparam1;
+                mcx_config.srcdata[is].srcparam2 = mcx_config.srcparam2;
+            }
+
+            for (int id = 0; id < Nd; id++) {
+                mcx_config.srcdata[Ns + id].srcpos  = {mcx_config.detpos[id].x, mcx_config.detpos[id].y,
+                                                       mcx_config.detpos[id].z, 1.f / Nd
+                                                      };
+                mcx_config.srcdata[Ns + id].srcdir  = {mcx_config.detdir[id].x, mcx_config.detdir[id].y,
+                                                       mcx_config.detdir[id].z, mcx_config.detdir[id].w
+                                                      };
+                mcx_config.srcdata[Ns + id].srcparam1 = {mcx_config.detpos[id].w, 0.f, 0.f, 0.f};
+                mcx_config.srcdata[Ns + id].srcparam2 = {0.f, 0.f, 0.f, 0.f};
+            }
+
+            if (MCX_IS_ADJOINT_TYPE(mcx_config.outputtype)) {
+                mcx_config.srcid = -1;
             }
         }
 

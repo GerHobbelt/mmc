@@ -260,13 +260,15 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
 #endif
             mesh_srcdetelem(&mesh, &cfg);
 
-            /** Build srcdata from detectors for adjoint mode.
+            /** Build srcdata from detectors for adjoint / srcid=-2 mode.
              *  The field buffer uses nsrcslots = srcnum + detnum slots:
              *    Slots 0..srcnum-1        : forward source photons (phi_src)
              *    Slots srcnum..srcnum+detnum-1 : detector-as-source photons (phi_det)
              *  The adjoint Jacobian kernel then computes J[vox,s,d] = phi_src[s] * phi_det[d].
+             *  srcid==-2 builds the same slot layout for forward fluence only (no Jacobian).
              */
-            if (MCX_IS_ADJOINT_TYPE(cfg.outputtype) && cfg.detnum > 0 && cfg.detdir != NULL) {
+            if ((MCX_IS_ADJOINT_TYPE(cfg.outputtype) || cfg.srcid == -2)
+                    && cfg.detnum > 0 && cfg.detdir != NULL) {
                 if (cfg.srcdata) {
                     free(cfg.srcdata);
                 }
@@ -299,6 +301,10 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                                                     };
                     cfg.srcdata[Ns + id].srcparam1 = {cfg.detpos[id].w, 0.f, 0.f, 0.f};
                     cfg.srcdata[Ns + id].srcparam2 = {0.f, 0.f, 0.f, 0.f};
+                }
+
+                if (MCX_IS_ADJOINT_TYPE(cfg.outputtype)) {
+                    cfg.srcid = -1;
                 }
             }
 

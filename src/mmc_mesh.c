@@ -1581,6 +1581,8 @@ void mesh_saveweight(tetmesh* mesh, mcconfig* cfg, int isref) {
     int i, j, datalen = (cfg->method == rtBLBadouelGrid) ? cfg->crop0.z : ( (cfg->basisorder) ? mesh->nn : mesh->ne);
     char fweight[MAX_FULL_PATH];
     double* data = mesh->weight;
+    /* multi-source / adjoint slot count; >1 only when cfg->extrasrclen > cfg->srcnum */
+    int nslots = (cfg->extrasrclen > cfg->srcnum) ? cfg->extrasrclen : cfg->srcnum;
 
     if (isref) {
         data = mesh->dref;
@@ -1597,12 +1599,12 @@ void mesh_saveweight(tetmesh* mesh, mcconfig* cfg, int isref) {
         uint3 dim0 = cfg->dim;
 
         if (cfg->method != rtBLBadouelGrid) {
-            cfg->dim.x = cfg->srcnum;
+            cfg->dim.x = nslots;
             cfg->dim.y = cfg->maxgate;
             cfg->dim.z = datalen;
         }
 
-        mcx_savedata(mesh->weight, datalen * cfg->maxgate * cfg->srcnum, cfg, isref);
+        mcx_savedata(mesh->weight, (size_t)datalen * cfg->maxgate * nslots, cfg, isref);
         cfg->dim = dim0;
         return;
     }
@@ -1611,20 +1613,36 @@ void mesh_saveweight(tetmesh* mesh, mcconfig* cfg, int isref) {
         MESH_ERROR("can not open weight file to write");
     }
 
-    for (i = 0; i < cfg->maxgate; i++) {
-        for (j = 0; j < datalen; j++) {
-            if (1 == cfg->srcnum) {
-                if (fprintf(fp, "%d\t%e\n", j + 1, data[i * datalen + j]) == 0) {
-                    MESH_ERROR("can not write to weight file");
-                }
-            } else { // multiple sources for pattern illumination type
-                int k, shift;
+    if (nslots > cfg->srcnum) {
+        /* adjoint / multi-source: exportfield laid out as [slot, gate, vox] (slot slowest);
+         * stride matches mmc_cu_host.cu post-normalize convention (slot_stride = datalen*maxgate). */
+        for (int slot = 0; slot < nslots; slot++) {
+            for (i = 0; i < cfg->maxgate; i++) {
+                for (j = 0; j < datalen; j++) {
+                    size_t shift = (size_t)slot * datalen * cfg->maxgate + (size_t)i * datalen + j;
 
-                for (k = 0; k < cfg->srcnum; k++) {
-                    shift = (i * datalen + j) * cfg->srcnum + k;
-
-                    if (fprintf(fp, "%d\t%d\t%e\n", j + 1, k + 1, data[shift]) == 0) {
+                    if (fprintf(fp, "%d\t%d\t%e\n", j + 1, slot + 1, data[shift]) == 0) {
                         MESH_ERROR("can not write to weight file");
+                    }
+                }
+            }
+        }
+    } else {
+        for (i = 0; i < cfg->maxgate; i++) {
+            for (j = 0; j < datalen; j++) {
+                if (1 == cfg->srcnum) {
+                    if (fprintf(fp, "%d\t%e\n", j + 1, data[i * datalen + j]) == 0) {
+                        MESH_ERROR("can not write to weight file");
+                    }
+                } else { // multiple sources for pattern illumination type
+                    int k, shift;
+
+                    for (k = 0; k < cfg->srcnum; k++) {
+                        shift = (i * datalen + j) * cfg->srcnum + k;
+
+                        if (fprintf(fp, "%d\t%d\t%e\n", j + 1, k + 1, data[shift]) == 0) {
+                            MESH_ERROR("can not write to weight file");
+                        }
                     }
                 }
             }
@@ -1812,16 +1830,6 @@ void mesh_savedetphoton(float* ppath, void* seeds, int count, int seedbyte, mcco
         cfg->his.seedbyte = seedbyte;
     }
 
-    /*
-        if (count > 0 && cfg->exportdetected == NULL) {
-            cfg->detectedcount = count;
-            cfg->exportdetected = (float*)malloc(cfg->his.colcount * cfg->detectedcount * sizeof(float));
-        }
-
-        if (cfg->exportdetected != ppath) {
-            memcpy(cfg->exportdetected, ppath, count * cfg->his.colcount * sizeof(float));
-        }
-    */
     fwrite(&(cfg->his), sizeof(history), 1, fp);
     fwrite(ppath, sizeof(float), count * cfg->his.colcount, fp);
 

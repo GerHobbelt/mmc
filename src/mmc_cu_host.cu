@@ -285,7 +285,7 @@ void mmc_run_simulation(mcconfig* cfg, tetmesh* mesh, raytracer* tracer, GPUInfo
         mesh->srcelemlen,
         cfg->e0,
         cfg->isextdet,
-        (uint)(meshlen / cfg->srcnum),
+        (uint)(meshlen / (cfg->srcnum * nsrcslots)),  /* framelen = datalen (per-gate stride); slot stride is datalen*maxgate */
         (uint)(mesh->prop + 1 + cfg->isextdet) + (uint)(cfg->extrasrclen * 4) + cfg->detnum,
         (uint)(MIN((MAX_PROP - (mesh->prop + 1 + cfg->isextdet) - (cfg->extrasrclen * 4) - cfg->detnum), ((mesh->ne) << 2)) >> 2), /*max count of elem normal data in const mem*/
         cfg->issaveseed,
@@ -293,7 +293,7 @@ void mmc_run_simulation(mcconfig* cfg, tetmesh* mesh, raytracer* tracer, GPUInfo
         cfg->maxjumpdebug,
         cfg->omega,
         (float)(3.335640951981520e-12),   /* oneoverc0 = 1/C0 in s/mm */
-        (cfg->extrasrclen > 0) ? -1 : 0,  /* srcid < 0 triggers multi-source mode */
+        (cfg->extrasrclen > 0 && cfg->srcid >= 0) ? -1 : cfg->srcid,  /* srcid < 0 triggers multi-source mode */
         cfg->extrasrclen,
         (int)(mesh->prop + 1 + cfg->isextdet)  /* srcpropoffset: gmed index where extra sources start */
     };
@@ -852,14 +852,47 @@ are more than what your have specified (%d), please use the --maxjumpdebug optio
                     }
                 }
             } else {
-                for (i = 0; i < cfg->maxgate; i++) {
-                    for (j = 0; j < mesh->ne; j++) {
-                        for (srcid = 0; srcid < cfg->srcnum; srcid++) {
-                            float ww = field[(i * mesh->ne + j) * cfg->srcnum + srcid] * 0.25f;
-                            int k;
+                /* basisorder=1 mesh mode: redistribute per-element fluence onto nodes.
+                 * Kernel layout per slot (adjoint, srcnum=1, nsrcslots>1):
+                 *   field[eid + gate*ne + slot*ne*maxgate]
+                 * Pattern source layout (srcnum>1, nsrcslots=1):
+                 *   field[(gate*ne + eid)*srcnum + pidx]
+                 * Output layout (matches grid's slot_stride = datalen * maxgate convention):
+                 *   exportfield[node + gate*nn + slot*nn*maxgate]   (adjoint, srcnum=1)
+                 *   exportfield[(gate*nn + node)*srcnum + pidx]      (pattern,   nsrcslots=1)
+                 */
+                uint nslots = (uint)((cfg->extrasrclen > 0) ? cfg->extrasrclen : 1);
 
-                            for (k = 0; k < mesh->elemlen; k++) {
-                                cfg->exportfield[(i * mesh->nn + mesh->elem[j * mesh->elemlen + k] - 1) * cfg->srcnum + srcid] += ww;
+                if (nslots > 1u && cfg->srcnum == 1) {
+                    for (uint slot = 0; slot < nslots; slot++) {
+                        size_t slot_off_f = (size_t)slot * (size_t)mesh->ne * (size_t)cfg->maxgate;
+                        size_t slot_off_e = (size_t)slot * (size_t)mesh->nn * (size_t)cfg->maxgate;
+
+                        for (i = 0; i < cfg->maxgate; i++) {
+                            size_t f_gate_off = (size_t)i * (size_t)mesh->ne;
+                            size_t e_gate_off = (size_t)i * (size_t)mesh->nn;
+
+                            for (j = 0; j < mesh->ne; j++) {
+                                float ww = field[slot_off_f + f_gate_off + j] * 0.25f;
+                                int k;
+
+                                for (k = 0; k < mesh->elemlen; k++) {
+                                    cfg->exportfield[slot_off_e + e_gate_off
+                                                                + mesh->elem[j * mesh->elemlen + k] - 1] += ww;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    for (i = 0; i < cfg->maxgate; i++) {
+                        for (j = 0; j < mesh->ne; j++) {
+                            for (srcid = 0; srcid < cfg->srcnum; srcid++) {
+                                float ww = field[(i * mesh->ne + j) * cfg->srcnum + srcid] * 0.25f;
+                                int k;
+
+                                for (k = 0; k < mesh->elemlen; k++) {
+                                    cfg->exportfield[(i * mesh->nn + mesh->elem[j * mesh->elemlen + k] - 1) * cfg->srcnum + srcid] += ww;
+                                }
                             }
                         }
                     }
@@ -886,11 +919,15 @@ are more than what your have specified (%d), please use the --maxjumpdebug optio
 
             cfg->his.normalizer = sum_normalizer / cfg->srcnum; // average normalizer value for all simulated sources
 
-            /* For adjoint Jacobian mode, mesh_normalize only covers slots 0..srcnum-1 in exportfield.
-             * Apply the same average normalizor to the remaining slots srcnum..extrasrclen-1. */
-            if (cfg->extrasrclen > cfg->srcnum && cfg->method == rtBLBadouelGrid && cfg->exportfield) {
+            /* For adjoint / multi-source mode, mesh_normalize only covers slots 0..srcnum-1
+             * in exportfield. Apply the same average normalizor to slots srcnum..extrasrclen-1.
+             * Works for both grid (datalen=crop0.z) and mesh (datalen=ne or nn) layouts. */
+            if (cfg->extrasrclen > cfg->srcnum && cfg->exportfield) {
                 double avg_normalizor = sum_normalizer / cfg->srcnum;
-                size_t slot_stride   = (size_t)cfg->crop0.z * cfg->maxgate;
+                size_t datalen = (cfg->method == rtBLBadouelGrid)
+                                 ? (size_t)cfg->crop0.z
+                                 : (size_t)((cfg->basisorder) ? mesh->nn : mesh->ne);
+                size_t slot_stride = datalen * (size_t)cfg->maxgate;
 
                 for (int slot = cfg->srcnum; slot < cfg->extrasrclen; slot++) {
                     for (size_t ki = 0; ki < slot_stride; ki++) {
@@ -1046,13 +1083,15 @@ are more than what your have specified (%d), please use the --maxjumpdebug optio
 
         if (cfg->issavedet && cfg->parentid == mpStandalone &&
                 cfg->exportdetected) {
+            MMC_FPRINTF(cfg->flog, "saving detected photon data to file ...\t");
             cfg->his.totalphoton = cfg->nphoton;
             cfg->his.unitinmm = cfg->unitinmm;
             cfg->his.savedphoton = cfg->detectedcount;
             cfg->his.detected = cfg->detectedcount;
             cfg->his.colcount = (2 + (cfg->ismomentum > 0)) * cfg->his.maxmedia + (cfg->issaveexit > 0) * 6 + 2; /*column count=maxmedia+3*/
-            mesh_savedetphoton(cfg->exportdetected, (void*)(cfg->exportseed), cfg->detectedcount,
-                               (sizeof(uint64_t) * RAND_BUF_LEN), cfg);
+            cfg->his.seedbyte = (cfg->exportseed) ? (sizeof(RandType) * RAND_BUF_LEN) : 0;
+            mcx_savedetphoton(cfg->exportdetected, (void*)(cfg->exportseed), cfg->detectedcount, 0, cfg);
+            MMC_FPRINTF(cfg->flog, "saving detected photon data complete : %d ms\n\n", GetTimeMillis() - tic);
         }
 
         /**
@@ -1061,11 +1100,13 @@ are more than what your have specified (%d), please use the --maxjumpdebug optio
          */
 
         if ((cfg->debuglevel & dlTraj) && cfg->parentid == mpStandalone && cfg->exportdebugdata) {
+            MMC_FPRINTF(cfg->flog, "saving trajectory data to file ...\t");
             cfg->his.colcount = MCX_DEBUG_REC_LEN;
             cfg->his.savedphoton = cfg->debugdatalen;
             cfg->his.totalphoton = cfg->nphoton;
             cfg->his.detected = 0;
-            mesh_savedetphoton(cfg->exportdebugdata, NULL, cfg->debugdatalen, 0, cfg);
+            mcx_savedetphoton(cfg->exportdebugdata, NULL, cfg->debugdatalen, 0, cfg);
+            MMC_FPRINTF(cfg->flog, "saving trajectory data complete : %d ms\n\n", GetTimeMillis() - tic);
         }
 
         if (cfg->issaveref) {

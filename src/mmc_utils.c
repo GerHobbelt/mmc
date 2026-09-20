@@ -83,9 +83,6 @@
 
 #define ubjw_write_single ubjw_write_float32
 #define ubjw_write_double ubjw_write_float64
-#define ubjw_write_uint16 ubjw_write_int16
-#define ubjw_write_uint32 ubjw_write_int32
-#define ubjw_write_uint64 ubjw_write_int64
 
 /**
  * Macro to include unit name and line number in the error message
@@ -107,7 +104,7 @@ const char shortopt[] = {'h', 'E', 'f', 'n', 'A', 't', 'T', 's', 'a', 'g', 'b', 
                          'd', 'r', 'S', 'e', 'U', 'R', 'l', 'L', 'I', '-', 'u', 'C', 'M',
                          'i', 'V', 'O', '-', 'F', 'q', 'x', 'P', 'k', 'v', 'm', '-', '-',
                          'J', 'o', 'H', '-', 'W', 'X', '-', 'c', 'Q', '-', 'Z', 'N', 'j',
-                         '\0'
+                         '-', '-', '\0'
                         };
 
 /**
@@ -126,7 +123,8 @@ const char* fullopt[] = {"--help", "--seed", "--input", "--photon", "--autopilot
                          "--replaydet", "--voidtime", "--version", "--mc", "--atomic",
                          "--debugphoton", "--compileropt", "--optlevel", "--maxdetphoton",
                          "--buffer", "--workload", "--saveref", "--gridsize", "--compute",
-                         "--bench", "--dumpjson", "--zip", "--net", "--json", ""
+                         "--bench", "--dumpjson", "--zip", "--net", "--json", "--maxjumpdebug",
+                         "--srcid", ""
                         };
 
 extern char pathsep;
@@ -272,6 +270,7 @@ void mcx_initcfg(mcconfig* cfg) {
     cfg->omega = 0.f;
     cfg->extrasrclen = 0;
     cfg->srcdata = NULL;
+    cfg->srcid = 0;
     cfg->detdir = NULL;
     cfg->exportadjoint = NULL;
     cfg->exportjacob = NULL;
@@ -609,7 +608,7 @@ void mcx_savebnii(void* vol, int ndim, uint* dims, float* voxelsize, char* name,
     FILE* fp;
     char fname[MAX_FULL_PATH] = {'\0'};
     int affine[] = {0, 0, 1, 0, 0, 0};
-    size_t datalen = sizeof(int), outputlen = 0;
+    size_t datalen = elemsize, outputlen = 0;
 
     ubjw_context_t* root = NULL;
     uchar* jsonstr = NULL;
@@ -618,8 +617,10 @@ void mcx_savebnii(void* vol, int ndim, uint* dims, float* voxelsize, char* name,
         datalen *= dims[i];
     }
 
-    jsonstr = malloc(datalen << 1);
-    root = ubjw_open_memory(jsonstr, jsonstr + (datalen << 1));
+    /* raw bytes (datalen) + 2x worst-case headroom for headers and ubjsons markers */
+    datalen = (datalen << 1) + 4096;
+    jsonstr = malloc(datalen);
+    root = ubjw_open_memory(jsonstr, jsonstr + datalen);
 
     ubjw_begin_object(root, UBJ_MIXED, 0);
     /* the "_DataInfo_" section */
@@ -1100,9 +1101,9 @@ void mcx_savejdet(float* ppath, void* seeds, uint count, int doappend, mcconfig*
     filetag = ((cfg->his.detected == 0  && cfg->his.savedphoton) ? 't' : 'h');
 
     if (cfg->rootpath[0]) {
-        sprintf(fhistory, "%s%c%s_%s.jdat", cfg->rootpath, pathsep, cfg->session, (filetag == 't' ? "traj" : "detp"));
+        sprintf(fhistory, "%s%c%s_%s.jdt", cfg->rootpath, pathsep, cfg->session, (filetag == 't' ? "traj" : "detp"));
     } else {
-        sprintf(fhistory, "%s_%s.jdat", cfg->session, (filetag == 't' ? "traj" : "detp"));
+        sprintf(fhistory, "%s_%s.jdt", cfg->session, (filetag == 't' ? "traj" : "detp"));
     }
 
     if (doappend) {
@@ -1124,6 +1125,205 @@ void mcx_savejdet(float* ppath, void* seeds, uint count, int doappend, mcconfig*
 
     if (root) {
         cJSON_Delete(root);
+    }
+}
+
+/**
+ * @brief Save detected photon data to a binary JData (.jdb) format file
+ *
+ * @param[in] ppath: buffer pointing to the detected photon data (partial path etc)
+ * @param[in] seeds: buffer pointing to the detected photon seed data
+ * @param[in] count: number of detected photons
+ * @param[in] doappend: flag if the new data is appended or write from the begining
+ * @param[in] cfg: simulation configuration
+ */
+
+void mcx_savejdb(float* ppath, void* seeds, uint count, int doappend, mcconfig* cfg) {
+    FILE* fp;
+    char fhistory[MAX_FULL_PATH], filetag;
+    ubjw_context_t* root = NULL;
+    uchar* jsonstr = NULL;
+    size_t datalen, outputlen = 0;
+    int col = 0, i, j, id;
+
+    datalen = (size_t)count * cfg->his.colcount * sizeof(float)
+              + (size_t)count * cfg->his.seedbyte + 4096;
+    jsonstr = malloc(datalen << 1);
+    root = ubjw_open_memory(jsonstr, jsonstr + (datalen << 1));
+
+    ubjw_begin_object(root, UBJ_MIXED, 0);
+
+    /* the "MCXData" section */
+    ubjw_write_key(root, "MCXData");
+    ubjw_begin_object(root, UBJ_MIXED, 0);
+
+    ubjw_write_key(root, "Info");
+    ubjw_begin_object(root, UBJ_MIXED, 0);
+    UBJ_WRITE_KEY(root, "Version",        uint32, cfg->his.version);
+    UBJ_WRITE_KEY(root, "MediaNum",       uint32, cfg->his.maxmedia);
+    UBJ_WRITE_KEY(root, "DetNum",         uint32, cfg->his.detnum);
+    UBJ_WRITE_KEY(root, "ColumnNum",      uint32, cfg->his.colcount);
+    UBJ_WRITE_KEY(root, "TotalPhoton",    uint32, cfg->his.totalphoton);
+    UBJ_WRITE_KEY(root, "DetectedPhoton", uint32, count);
+    UBJ_WRITE_KEY(root, "SavedPhoton",    uint32, cfg->his.savedphoton);
+    UBJ_WRITE_KEY(root, "LengthUnit",     single, cfg->his.unitinmm);
+    UBJ_WRITE_KEY(root, "SeedByte",       uint32, cfg->his.seedbyte);
+    UBJ_WRITE_KEY(root, "Normalizer",     single, cfg->his.normalizer);
+    UBJ_WRITE_KEY(root, "Repeat",         int32,  cfg->his.respin);
+    UBJ_WRITE_KEY(root, "SrcNum",         uint32, cfg->his.srcnum);
+    UBJ_WRITE_KEY(root, "SaveDetFlag",    uint32, cfg->his.savedetflag);
+    ubjw_write_key(root, "Media");
+    ubjw_begin_array(root, UBJ_MIXED, 0);
+
+    for (i = 0; i < cfg->medianum; i++) {
+        ubjw_begin_object(root, UBJ_MIXED, 4);
+        UBJ_WRITE_KEY(root, "mua", single, cfg->prop[i].mua / cfg->unitinmm);
+        UBJ_WRITE_KEY(root, "mus", single, cfg->prop[i].mus / cfg->unitinmm);
+        UBJ_WRITE_KEY(root, "g",   single, cfg->prop[i].g);
+        UBJ_WRITE_KEY(root, "n",   single, cfg->prop[i].n);
+        ubjw_end(root);
+    }
+
+    ubjw_end(root); /* end of "Media" */
+    ubjw_end(root); /* end of "Info" */
+
+    if (cfg->his.detected == 0 && cfg->his.savedphoton) {
+        char colnum[] = {1, 3, 1};
+        char* dtype[] = {"uint32", "single", "single"};
+        char* dname[] = {"photonid", "p", "w0"};
+
+        ubjw_write_key(root, "Trajectory");
+        ubjw_begin_object(root, UBJ_MIXED, 0);
+
+        for (id = 0; id < (int)sizeof(colnum); id++) {
+            uint dims[2] = {count, colnum[id]};
+            float* buf = (float*)calloc(dims[0] * dims[1], sizeof(float));
+
+            for (i = 0; i < (int)dims[0]; i++)
+                for (j = 0; j < (int)dims[1]; j++) {
+                    buf[i * dims[1] + j] = ppath[i * cfg->his.colcount + col + j];
+                }
+
+            ubjw_write_key(root, dname[id]);
+            ubjw_begin_object(root, UBJ_MIXED, 0);
+
+            if (mcx_jdataencode(buf, 2, dims, dtype[id], 4, cfg->zipid, root, 1, 1, cfg)) {
+                MMC_ERROR(-1, "error when converting to JSON");
+            }
+
+            ubjw_end(root);
+            free(buf);
+            col += dims[1];
+        }
+
+        if (cfg->issaveseed && seeds != NULL) {
+            uint dims[2] = {count, cfg->his.seedbyte};
+            ubjw_write_key(root, "seed");
+            ubjw_begin_object(root, UBJ_MIXED, 0);
+
+            if (mcx_jdataencode(seeds, 2, dims, "uint8", 1, cfg->zipid, root, 1, 1, cfg)) {
+                MMC_ERROR(-1, "error when converting to JSON");
+            }
+
+            ubjw_end(root);
+        }
+
+        ubjw_end(root); /* end of "Trajectory" */
+    } else {
+        char colnum[] = {1, cfg->his.maxmedia, cfg->his.maxmedia, cfg->his.maxmedia, 3, 3, 1};
+        char* dtype[] = {"uint32", "uint32", "single", "single", "single", "single", "single"};
+        char* dname[] = {"detid", "nscat", "ppath", "mom", "p", "v", "w0"};
+
+        ubjw_write_key(root, "PhotonData");
+        ubjw_begin_object(root, UBJ_MIXED, 0);
+
+        for (id = 0; id < (int)sizeof(colnum); id++) {
+            if ((cfg->savedetflag >> id) & 0x1) {
+                uint dims[2] = {count, colnum[id]};
+                void* val = NULL;
+                float* fbuf = NULL;
+                uint*  ibuf = NULL;
+
+                if (!strcmp(dtype[id], "uint32")) {
+                    ibuf = (uint*)calloc(dims[0] * dims[1], sizeof(uint));
+
+                    for (i = 0; i < (int)dims[0]; i++)
+                        for (j = 0; j < (int)dims[1]; j++) {
+                            ibuf[i * dims[1] + j] = ppath[i * cfg->his.colcount + col + j];
+                        }
+
+                    val = (void*)ibuf;
+                } else {
+                    fbuf = (float*)calloc(dims[0] * dims[1], sizeof(float));
+
+                    for (i = 0; i < (int)dims[0]; i++)
+                        for (j = 0; j < (int)dims[1]; j++) {
+                            fbuf[i * dims[1] + j] = ppath[i * cfg->his.colcount + col + j];
+                        }
+
+                    val = (void*)fbuf;
+                }
+
+                ubjw_write_key(root, dname[id]);
+                ubjw_begin_object(root, UBJ_MIXED, 0);
+
+                if (mcx_jdataencode(val, 2, dims, dtype[id], 4, cfg->zipid, root, 1, 1, cfg)) {
+                    MMC_ERROR(-1, "error when converting to JSON");
+                }
+
+                ubjw_end(root);
+                free(val);
+                col += dims[1];
+            }
+        }
+
+        if (cfg->issaveseed && seeds != NULL) {
+            uint dims[2] = {count, cfg->his.seedbyte};
+            ubjw_write_key(root, "seed");
+            ubjw_begin_object(root, UBJ_MIXED, 0);
+
+            if (mcx_jdataencode(seeds, 2, dims, "uint8", 1, cfg->zipid, root, 1, 1, cfg)) {
+                MMC_ERROR(-1, "error when converting to JSON");
+            }
+
+            ubjw_end(root);
+        }
+
+        ubjw_end(root); /* end of "PhotonData" */
+    }
+
+    ubjw_end(root); /* end of "MCXData" */
+    ubjw_end(root); /* end of root object */
+
+    outputlen = ubjw_close_context(root);
+
+    if (jsonstr == NULL) {
+        MMC_ERROR(-1, "error when converting to JSON");
+    }
+
+    filetag = ((cfg->his.detected == 0 && cfg->his.savedphoton) ? 't' : 'h');
+
+    if (cfg->rootpath[0]) {
+        sprintf(fhistory, "%s%c%s_%s.jdb", cfg->rootpath, pathsep, cfg->session, (filetag == 't' ? "traj" : "detp"));
+    } else {
+        sprintf(fhistory, "%s_%s.jdb", cfg->session, (filetag == 't' ? "traj" : "detp"));
+    }
+
+    if (doappend) {
+        fp = fopen(fhistory, "ab");
+    } else {
+        fp = fopen(fhistory, "wb");
+    }
+
+    if (fp == NULL) {
+        MMC_ERROR(-2, "can not save data to disk");
+    }
+
+    fwrite(jsonstr, outputlen, 1, fp);
+    fclose(fp);
+
+    if (jsonstr) {
+        free(jsonstr);
     }
 }
 
@@ -1589,6 +1789,10 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
 
             if (subitem) {
                 cfg->srctype = mcx_keylookup(subitem->valuestring, srctypeid);
+            }
+
+            if (FIND_JSON_OBJ("ID", "Optode.Source.ID", src)) {
+                cfg->srcid = FIND_JSON_KEY("ID", "Optode.Source.ID", src, cfg->srcid, valueint);
             }
 
             subitem = FIND_JSON_OBJ("Param1", "Optode.Source.Param1", src);
@@ -2582,7 +2786,17 @@ int  mcx_jdatadecode(void** vol, int* ndim, uint* dims, int maxdim, char** type,
 
             cfg->isrowmajor = 1;
         } else {
-            MMC_ERROR(-1, "Only compressed JData array constructs are supported");
+            /* uncompressed _ArrayData_: base64-decode only, no further zmat pass */
+            size_t len;
+            int status = 0;
+
+            if (*vol) {
+                free(*vol);
+                *vol = NULL;
+            }
+
+            ret = zmat_decode(strlen(vdata->valuestring), (uchar*)vdata->valuestring, &len, (uchar**)(vol), zmBase64, &status);
+            cfg->isrowmajor = 1;
         }
     } else {
         MMC_ERROR(-1, "No _ArrayZipData_ field is found");
@@ -2626,7 +2840,7 @@ int  mcx_jdataencode(void* vol, int ndim, uint* dims, char* type, int byte, int 
         MMC_FPRINTF(cfg->flog, "compressing data [%s] ...", zipformat[zipid]);
     }
 
-    /*compress data using zlib*/
+    /*compress data using zlib; zmBase64 means no compression (raw _ArrayData_)*/
     if (zipid != zmBase64) {
         ret = zmat_encode(totalbytes, (uchar*)vol, &compressedbytes, (uchar**)&compressed, zipid, &status);
     } else {
@@ -2649,10 +2863,44 @@ int  mcx_jdataencode(void* vol, int ndim, uint* dims, char* type, int byte, int 
                 UBJ_WRITE_KEY(item, "_ArrayOrder_", string, "c");
             }
 
-            UBJ_WRITE_KEY(item, "_ArrayZipType_", string, zipformat[zipid]);
-            UBJ_WRITE_KEY(item, "_ArrayZipSize_", uint32, datalen);
-            ubjw_write_key(item, "_ArrayZipData_");
-            ubjw_write_buffer(item, compressed, UBJ_UINT8, compressedbytes);
+            if (!cfg->isdumpjson) {
+                MMC_FPRINTF(cfg->flog, "\n");
+            }
+
+            if (zipid == zmBase64) {
+                /* binary JSON: raw typed _ArrayData_ buffer (no base64) */
+                UBJ_TYPE marker = UBJ_UINT8;
+
+                if (!strcmp(type, "int8")) {
+                    marker = UBJ_INT8;
+                } else if (!strcmp(type, "uint8")) {
+                    marker = UBJ_UINT8;
+                } else if (!strcmp(type, "int16")) {
+                    marker = UBJ_INT16;
+                } else if (!strcmp(type, "uint16")) {
+                    marker = UBJ_UINT16;
+                } else if (!strcmp(type, "int32")) {
+                    marker = UBJ_INT32;
+                } else if (!strcmp(type, "uint32")) {
+                    marker = UBJ_UINT32;
+                } else if (!strcmp(type, "int64")) {
+                    marker = UBJ_INT64;
+                } else if (!strcmp(type, "uint64")) {
+                    marker = UBJ_UINT64;
+                } else if (!strcmp(type, "single") || !strcmp(type, "float32")) {
+                    marker = UBJ_FLOAT32;
+                } else if (!strcmp(type, "double") || !strcmp(type, "float64")) {
+                    marker = UBJ_FLOAT64;
+                }
+
+                ubjw_write_key(item, "_ArrayData_");
+                ubjw_write_buffer(item, (uint8_t*)vol, marker, datalen);
+            } else {
+                UBJ_WRITE_KEY(item, "_ArrayZipType_", string, zipformat[zipid]);
+                UBJ_WRITE_KEY(item, "_ArrayZipSize_", uint32, datalen);
+                ubjw_write_key(item, "_ArrayZipData_");
+                ubjw_write_buffer(item, compressed, UBJ_UINT8, compressedbytes);
+            }
         } else {
             totalbytes = 0;
             /*encode data using base64*/
@@ -2670,9 +2918,14 @@ int  mcx_jdataencode(void* vol, int ndim, uint* dims, char* type, int byte, int 
                     cJSON_AddStringToObject((cJSON*)obj, "_ArrayOrder_", "c");
                 }
 
-                cJSON_AddStringToObject((cJSON*)obj, "_ArrayZipType_", zipformat[zipid]);
-                cJSON_AddNumberToObject((cJSON*)obj, "_ArrayZipSize_", datalen);
-                cJSON_AddStringToObject((cJSON*)obj, "_ArrayZipData_", (char*)buf);
+                if (zipid == zmBase64) {
+                    /* text JSON: base64-encoded raw bytes, no compression keys */
+                    cJSON_AddStringToObject((cJSON*)obj, "_ArrayData_", (char*)buf);
+                } else {
+                    cJSON_AddStringToObject((cJSON*)obj, "_ArrayZipType_", zipformat[zipid]);
+                    cJSON_AddNumberToObject((cJSON*)obj, "_ArrayZipSize_", datalen);
+                    cJSON_AddStringToObject((cJSON*)obj, "_ArrayZipData_", (char*)buf);
+                }
             }
         }
     }
@@ -3181,6 +3434,10 @@ void mmc_validate_config(mcconfig* cfg, float* detps, int dimdetps[2], int seedb
         MMC_ERROR(999, "multiple source simulation is currently not supported under replay mode");
     }
 
+    if (cfg->extrasrclen > 0 && cfg->srcid > cfg->extrasrclen) {
+        MMC_ERROR(-4, "srcid exceeds total defined source count");
+    }
+
     cfg->his.unitinmm = cfg->unitinmm;
 
     if (cfg->steps.x != cfg->steps.y || cfg->steps.y != cfg->steps.z) {
@@ -3232,6 +3489,56 @@ void mcx_prep(mcconfig* cfg) {
     if (cfg->issaveexit) {
         cfg->savedetflag = SET_SAVE_PEXIT(cfg->savedetflag);
         cfg->savedetflag = SET_SAVE_VEXIT(cfg->savedetflag);
+    }
+
+    /**
+     * Append detectors as reversed sources for adjoint / srcid=-2 mode.
+     * In the mex containers (mmclab/pmmc), this is handled in the host wrapper
+     * before mmc_prep is called, in which case cfg->srcdata is already populated;
+     * we detect that and skip to avoid double-appending.
+     *
+     * Convention (matches mmclab.cpp / pmmc.cpp):
+     *   srcdata[0..Ns-1]        : forward sources (copy of cfg->srcpos/srcdir)
+     *   srcdata[Ns..Ns+Nd-1]    : detector-as-adjoint sources
+     */
+    if ((MCX_IS_ADJOINT_TYPE(cfg->outputtype) || cfg->srcid == -2) && cfg->seed != SEED_FROM_FILE
+            && cfg->detnum > 0 && cfg->detdir != NULL && cfg->srcdata == NULL) {
+        int Ns = (cfg->srcnum > 0) ? cfg->srcnum : 1;
+        int Nd = cfg->detnum;
+        cfg->extrasrclen = Ns + Nd;
+        cfg->srcdata = (ExtraSrc*)calloc(cfg->extrasrclen, sizeof(ExtraSrc));
+
+        for (int is = 0; is < Ns; is++) {
+            cfg->srcdata[is].srcpos.x  = cfg->srcpos.x;
+            cfg->srcdata[is].srcpos.y  = cfg->srcpos.y;
+            cfg->srcdata[is].srcpos.z  = cfg->srcpos.z;
+            cfg->srcdata[is].srcpos.w  = 1.f / Ns;
+            cfg->srcdata[is].srcdir.x  = cfg->srcdir.x;
+            cfg->srcdata[is].srcdir.y  = cfg->srcdir.y;
+            cfg->srcdata[is].srcdir.z  = cfg->srcdir.z;
+            cfg->srcdata[is].srcdir.w  = 0.f;
+            cfg->srcdata[is].srcparam1 = cfg->srcparam1;
+            cfg->srcdata[is].srcparam2 = cfg->srcparam2;
+        }
+
+        for (int id = 0; id < Nd; id++) {
+            cfg->srcdata[Ns + id].srcpos.x    = cfg->detpos[id].x;
+            cfg->srcdata[Ns + id].srcpos.y    = cfg->detpos[id].y;
+            cfg->srcdata[Ns + id].srcpos.z    = cfg->detpos[id].z;
+            cfg->srcdata[Ns + id].srcpos.w    = 1.f / Nd;
+            cfg->srcdata[Ns + id].srcdir.x    = cfg->detdir[id].x;
+            cfg->srcdata[Ns + id].srcdir.y    = cfg->detdir[id].y;
+            cfg->srcdata[Ns + id].srcdir.z    = cfg->detdir[id].z;
+            cfg->srcdata[Ns + id].srcdir.w    = cfg->detdir[id].w;
+            cfg->srcdata[Ns + id].srcparam1.x = cfg->detpos[id].w; /* detector radius (disk source) */
+            cfg->srcdata[Ns + id].srcparam1.y = 0.f;
+            cfg->srcdata[Ns + id].srcparam1.z = 0.f;
+            cfg->srcdata[Ns + id].srcparam1.w = 0.f;
+        }
+
+        if (MCX_IS_ADJOINT_TYPE(cfg->outputtype)) {
+            cfg->srcid = -1;
+        }
     }
 
 }
@@ -3650,6 +3957,8 @@ void mcx_parsecmd(int argc, char* argv[], mcconfig* cfg) {
                         i = mcx_readarg(argc, argv, i, &(cfg->steps.x), "float");
                         cfg->steps.y = cfg->steps.x;
                         cfg->steps.z = cfg->steps.x;
+                    } else if (strcmp(argv[i] + 2, "srcid") == 0) {
+                        i = mcx_readarg(argc, argv, i, &(cfg->srcid), "int");
                     } else {
                         MMC_FPRINTF(cfg->flog, "unknown verbose option: --%s\n", argv[i] + 2);
                     }
@@ -3744,8 +4053,13 @@ void mcx_savedetphoton(float* ppath, void* seeds, int count, int doappend, mccon
     FILE* fp;
     char fhistory[MAX_FULL_PATH];
 
-    if (cfg->outputformat == ofJNifti || cfg->outputformat == ofBJNifti) {
+    if (cfg->outputformat == ofJNifti) {
         mcx_savejdet(ppath, seeds, count, doappend, cfg);
+        return;
+    }
+
+    if (cfg->outputformat == ofBJNifti) {
+        mcx_savejdb(ppath, seeds, count, doappend, cfg);
         return;
     }
 
@@ -3909,7 +4223,8 @@ where possible parameters include (the first item in [] is the default value)\n\
                             is used (when saving data to JSON/JNIfTI format)\n\
                             0 zlib: zip format (moderate compression,fast) \n\
                             1 gzip: gzip format (compatible with *.gz)\n\
-                            2 base64: base64 encoding with no compression\n\
+                            2 base64: no compression; raw _ArrayData_ (base64 in\n\
+                              text JSON, raw binary in BJData)\n\
                             3 lzip: lzip format (high compression,very slow)\n\
                             4 lzma: lzma format (high compression,very slow)\n\
                             5 lz4: LZ4 format (low compression,extrem. fast)\n\
@@ -3953,6 +4268,11 @@ where possible parameters include (the first item in [] is the default value)\n\
 == Additional options ==\n"S_RESET"\
  --momentum     [0|1]          1 to save photon momentum transfer,0 not to save\n\
  --gridsize     [1|float]      if -M G is used, this sets the grid size in mm\n\
+ --srcid  [0|-1,0,1,2,..]      -1 simulate each source/detector slot separately\n\
+                               0 all sources together (default)\n\
+                               -2 append detectors as adjoint sources (forward\n\
+                               fluence in all Ns+Nd slots, no Jacobian)\n\
+                               N>0 run only the N-th source\n\
  --maxjumpdebug [10000000|int] when trajectory is requested (i.e. -D S),\n\
                                use this parameter to set the maximum positions\n\
                                stored (default: 1e7)\n\
