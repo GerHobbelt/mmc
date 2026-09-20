@@ -134,9 +134,25 @@ int mmc_cleanup(mcconfig* cfg, tetmesh* mesh, raytracer* tracer) {
  */
 
 int mmc_prep(mcconfig* cfg, tetmesh* mesh, raytracer* tracer) {
+    /* Mesh-mode adjoint Jacobian needs nodal fluence (basisorder=1) so that
+     * phi(node) is well-defined and ∇φ is non-zero inside each tet. */
+    if (MCX_IS_ADJOINT_TYPE(cfg->outputtype) && cfg->method != rtBLBadouelGrid && cfg->basisorder != 1) {
+        MMC_ERROR(-4, "mesh-mode adjoint Jacobian requires basisorder=1 (nodal fluence); "
+                  "use cfg.method='grid' or set cfg.basisorder=1");
+    }
+
     mcx_prep(cfg);
     tracer_init(tracer, mesh, cfg->method);
     tracer_prep(tracer, cfg);
+
+    /* Precompute <grad(phi_i).grad(phi_j)>*Ve for mesh-mode adjoint Jacobian.
+     * Required for J_D in elem/node-based mesh adjoint outputs (mcx-style
+     * grid adjoint uses finite differences instead and does not need this). */
+    if (MCX_IS_ADJOINT_TYPE(cfg->outputtype) && cfg->method != rtBLBadouelGrid
+            && mesh->ne > 0 && mesh->node && mesh->elem && mesh->evol && mesh->deldotdel == NULL) {
+        mesh_deldotdel(mesh);
+    }
+
     return 0;
 }
 

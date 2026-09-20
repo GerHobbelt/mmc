@@ -131,6 +131,7 @@ void mesh_init(tetmesh* mesh) {
     mesh->weight = NULL;
     mesh->evol = NULL;
     mesh->nvol = NULL;
+    mesh->deldotdel = NULL;
     mesh->dref = NULL;
     mesh->nmin.x = VERY_BIG;
     mesh->nmin.y = VERY_BIG;
@@ -206,6 +207,11 @@ void mesh_clear(tetmesh* mesh, mcconfig* cfg) {
     if (mesh->evol) {
         free(mesh->evol);
         mesh->evol = NULL;
+    }
+
+    if (mesh->deldotdel) {
+        free(mesh->deldotdel);
+        mesh->deldotdel = NULL;
     }
 
     if (mesh->nvol) {
@@ -968,6 +974,81 @@ void mesh_getvolume(tetmesh* mesh, mcconfig* cfg) {
 }
 
 /**
+ * @brief Precompute deldotdel[t][10] = ⟨∇φ_i·∇φ_j⟩ * Ve for each element.
+ *
+ * For a linear tetrahedral basis, ∇φ_i is constant inside the element. This
+ * function computes the 10 unique upper-triangle entries of the 4×4 symmetric
+ * matrix ⟨∇φ_i·∇φ_j⟩, multiplied by the element volume Ve. The packed order is
+ *   [d00, d01, d02, d03, d11, d12, d13, d22, d23, d33].
+ *
+ * Required by the mesh-mode adjoint J_D computation; allocated lazily.
+ * Direct port of rb_deldotdel() from redbird-m/matlab/rbfemmatrix.cpp:851-905.
+ *
+ * @param[in,out] mesh: mesh with node/elem/evol populated; on return,
+ *                      mesh->deldotdel points to a malloc'd ne×10 double array.
+ */
+void mesh_deldotdel(tetmesh* mesh) {
+    int i1, i2, i3, i4, i, j, t;
+    double derx[4], dery[4], derz[4];
+    double Ve, RVe6;
+    FLOAT3* N = mesh->node;
+
+    if (mesh->deldotdel) {
+        free(mesh->deldotdel);
+    }
+
+    mesh->deldotdel = (double*)calloc((size_t)mesh->ne * 10, sizeof(double));
+
+    for (t = 0; t < mesh->ne; t++) {
+        int* ee = (int*)(mesh->elem + t * mesh->elemlen);
+        i1 = ee[0] - 1;
+        i2 = ee[1] - 1;
+        i3 = ee[2] - 1;
+        i4 = ee[3] - 1;
+
+        Ve = mesh->evol[t];
+        RVe6 = 1.0 / (Ve * 6.0);
+
+        derx[0] = -((N[i3].y * N[i4].z - N[i3].z * N[i4].y) - N[i2].y * (N[i4].z - N[i3].z)
+                    + N[i2].z * (N[i4].y - N[i3].y)) * RVe6;
+        dery[0] = ((N[i3].x * N[i4].z - N[i4].x * N[i3].z) - N[i2].x * (N[i4].z - N[i3].z)
+                   + N[i2].z * (N[i4].x - N[i3].x)) * RVe6;
+        derz[0] = -((N[i3].x * N[i4].y - N[i3].y * N[i4].x) - N[i2].x * (N[i4].y - N[i3].y)
+                    + N[i2].y * (N[i4].x - N[i3].x)) * RVe6;
+
+        derx[1] = ((N[i3].y * N[i4].z - N[i3].z * N[i4].y) - N[i1].y * (N[i4].z - N[i3].z)
+                   + N[i1].z * (N[i4].y - N[i3].y)) * RVe6;
+        dery[1] = -((N[i3].x * N[i4].z - N[i4].x * N[i3].z) - N[i1].x * (N[i4].z - N[i3].z)
+                    + N[i1].z * (N[i4].x - N[i3].x)) * RVe6;
+        derz[1] = ((N[i3].x * N[i4].y - N[i3].y * N[i4].x) - N[i1].x * (N[i4].y - N[i3].y)
+                   + N[i1].y * (N[i4].x - N[i3].x)) * RVe6;
+
+        derx[2] = -((N[i2].y * N[i4].z - N[i2].z * N[i4].y) - N[i1].y * (N[i4].z - N[i2].z)
+                    + N[i1].z * (N[i4].y - N[i2].y)) * RVe6;
+        dery[2] = ((N[i2].x * N[i4].z - N[i4].x * N[i2].z) - N[i1].x * (N[i4].z - N[i2].z)
+                   + N[i1].z * (N[i4].x - N[i2].x)) * RVe6;
+        derz[2] = -((N[i2].x * N[i4].y - N[i2].y * N[i4].x) - N[i1].x * (N[i4].y - N[i2].y)
+                    + N[i1].y * (N[i4].x - N[i2].x)) * RVe6;
+
+        derx[3] = ((N[i2].y * N[i3].z - N[i2].z * N[i3].y) - N[i1].y * (N[i3].z - N[i2].z)
+                   + N[i1].z * (N[i3].y - N[i2].y)) * RVe6;
+        dery[3] = -((N[i2].x * N[i3].z - N[i3].x * N[i2].z) - N[i1].x * (N[i3].z - N[i2].z)
+                    + N[i1].z * (N[i3].x - N[i2].x)) * RVe6;
+        derz[3] = ((N[i2].x * N[i3].y - N[i2].y * N[i3].x) - N[i1].x * (N[i3].y - N[i2].y)
+                   + N[i1].y * (N[i3].x - N[i2].x)) * RVe6;
+
+        /* upper triangle packed as [00,01,02,03,11,12,13,22,23,33] */
+        int idx = 0;
+
+        for (i = 0; i < 4; i++)
+            for (j = i; j < 4; j++) {
+                mesh->deldotdel[t * 10 + idx] = (derx[i] * derx[j] + dery[i] * dery[j] + derz[i] * derz[j]) * Ve;
+                idx++;
+            }
+    }
+}
+
+/**
  * @brief Scan all tetrahedral elements to find the one enclosing the source
  *
  * @param[in] mesh: the mesh object
@@ -1667,9 +1748,11 @@ void mesh_saveweight(tetmesh* mesh, mcconfig* cfg, int isref) {
  * @param[in] isdual: 1 for dual types (two Jacobians), 0 for single
  */
 
-void mesh_savejacob(mcconfig* cfg, float* jac, int Ns, int Nd, int isrfforward, int isdual) {
+void mesh_savejacob(mcconfig* cfg, tetmesh* mesh, float* jac, int Ns, int Nd, int isrfforward, int isdual) {
     char name[MAX_FULL_PATH];
-    size_t adjlen = (size_t)cfg->crop0.z * Ns * Nd;
+    int ismesh = (cfg->method != rtBLBadouelGrid);
+    size_t datalen = ismesh ? (size_t)mesh->nn : (size_t)cfg->crop0.z;
+    size_t adjlen = datalen * Ns * Nd;
 
     /* Jacobian component name suffixes per output type */
     const char* suffix1 = "jmua";   /* first (or only) Jacobian component */
@@ -1707,25 +1790,45 @@ void mesh_savejacob(mcconfig* cfg, float* jac, int Ns, int Nd, int isrfforward, 
             break;
     }
 
-    /* Dimensions: [Nx, Ny, Nz, maxgate, Ns*Nd] */
-    uint jdims[5] = {(uint)cfg->dim.x, (uint)cfg->dim.y, (uint)cfg->dim.z,
-                     (uint)cfg->maxgate, (uint)(Ns * Nd)
-                    };
-    float jvoxsz[5] = {cfg->steps.x, cfg->steps.y, cfg->steps.z, cfg->tstep, 1.f};
+    /* Dimensions:
+     *   grid mode: [Nx, Ny, Nz, maxgate, Ns*Nd]      (jndim = 5)
+     *   mesh mode: [nn, Ns*Nd]                       (jndim = 2, CW only) */
+    uint jdims[5];
+    float jvoxsz[5];
+    int jndim;
+
+    if (ismesh) {
+        jdims[0]  = (uint)mesh->nn;
+        jdims[1]  = (uint)(Ns * Nd);
+        jvoxsz[0] = 1.f;
+        jvoxsz[1] = 1.f;
+        jndim = 2;
+    } else {
+        jdims[0] = (uint)cfg->dim.x;
+        jdims[1] = (uint)cfg->dim.y;
+        jdims[2] = (uint)cfg->dim.z;
+        jdims[3] = (uint)cfg->maxgate;
+        jdims[4] = (uint)(Ns * Nd);
+        jvoxsz[0] = cfg->steps.x;
+        jvoxsz[1] = cfg->steps.y;
+        jvoxsz[2] = cfg->steps.z;
+        jvoxsz[3] = cfg->tstep;
+        jvoxsz[4] = 1.f;
+        jndim = 5;
+    }
 
     /* RF: pack real and imaginary parts; for single-component: [Re, Im] */
     /* Build output format selection for save */
-    int jndim = 5;
     uint jdims_ri[6];
     float jvoxsz_ri[6];
 
     if (isrfforward) {
-        /* For RF: save real+imaginary interleaved as extra dimension [Nx,Ny,Nz,maxgate,Ns*Nd,2] */
+        /* For RF: append a trailing axis of size 2 for [re, im] */
         memcpy(jdims_ri, jdims, sizeof(jdims));
         memcpy(jvoxsz_ri, jvoxsz, sizeof(jvoxsz));
-        jdims_ri[5] = 2;
-        jvoxsz_ri[5] = 1.f;
-        jndim = 6;
+        jdims_ri[jndim] = 2;
+        jvoxsz_ri[jndim] = 1.f;
+        jndim++;
     }
 
     /* Save first Jacobian component */

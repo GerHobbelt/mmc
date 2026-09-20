@@ -150,6 +150,10 @@ void parse_config(const py::dict& user_cfg, mcconfig& mcx_config, tetmesh& mesh)
     GET_SCALAR_FIELD(user_cfg, mcx_config, maxdetphoton, py::int_);
     GET_SCALAR_FIELD(user_cfg, mcx_config, maxjumpdebug, py::int_);
     GET_SCALAR_FIELD(user_cfg, mcx_config, e0, py::int_);
+    GET_SCALAR_FIELD(user_cfg, mcx_config, srcid, py::int_);
+    GET_SCALAR_FIELD(user_cfg, mcx_config, adjointmode, py::int_);
+    GET_SCALAR_FIELD(user_cfg, mcx_config, isnodalmua, py::int_);
+    GET_SCALAR_FIELD(user_cfg, mcx_config, isnodalmusp, py::int_);
     GET_VEC3_FIELD(user_cfg, mcx_config, srcpos, float);
     GET_VEC34_FIELD(user_cfg, mcx_config, srcdir, float);
     GET_VEC3_FIELD(user_cfg, mcx_config, steps, float);
@@ -546,6 +550,48 @@ void parse_config(const py::dict& user_cfg, mcconfig& mcx_config, tetmesh& mesh)
             }
 
         std::cout << "detdir: [" << nd << ",4]" << std::endl;
+    }
+
+    /* per-node optical properties: cfg.nodemua / cfg.nodemusp are length-nn float arrays.
+     * Either array's presence auto-sets the corresponding isnodal* flag. */
+    if (user_cfg.contains("nodemua")) {
+        auto arr = py::array_t < float, py::array::f_style | py::array::forcecast >::ensure(user_cfg["nodemua"]);
+
+        if (!arr) {
+            throw py::value_error("Invalid nodemua field value");
+        }
+
+        auto buffer_info = arr.request();
+        size_t nn = (size_t)buffer_info.size;
+
+        if (mcx_config.nodemua) {
+            free(mcx_config.nodemua);
+        }
+
+        mcx_config.nodemua = (float*) malloc(nn * sizeof(float));
+        memcpy(mcx_config.nodemua, buffer_info.ptr, nn * sizeof(float));
+        mcx_config.isnodalmua = 1;
+        std::cout << "nodemua: [" << nn << "]" << std::endl;
+    }
+
+    if (user_cfg.contains("nodemusp")) {
+        auto arr = py::array_t < float, py::array::f_style | py::array::forcecast >::ensure(user_cfg["nodemusp"]);
+
+        if (!arr) {
+            throw py::value_error("Invalid nodemusp field value");
+        }
+
+        auto buffer_info = arr.request();
+        size_t nn = (size_t)buffer_info.size;
+
+        if (mcx_config.nodemusp) {
+            free(mcx_config.nodemusp);
+        }
+
+        mcx_config.nodemusp = (float*) malloc(nn * sizeof(float));
+        memcpy(mcx_config.nodemusp, buffer_info.ptr, nn * sizeof(float));
+        mcx_config.isnodalmusp = 1;
+        std::cout << "nodemusp: [" << nn << "]" << std::endl;
     }
 
 
@@ -991,10 +1037,11 @@ py::dict pmmc_interface(const py::dict& user_cfg) {
             int isrfforward = (mcx_config.omega > 0.f && mcx_config.seed != SEED_FROM_FILE);
             int isadjoint = MCX_IS_ADJOINT_TYPE(mcx_config.outputtype);
 
-            /* In adjoint mode the weight buffer holds nsrcslots = extrasrclen = Ns+Nd slots;
-             * otherwise it is simply cfg.srcnum. The GPU layout for adjoint is
-             * [dim.x, dim.y, dim.z, maxgate, nsrcslots] (slot index slowest). */
-            int nsrcslots = (isadjoint && mcx_config.extrasrclen > mcx_config.srcnum) ? mcx_config.extrasrclen : mcx_config.srcnum;
+            /* When extrasrclen exceeds srcnum, the kernel runs nsrcslots = extrasrclen
+             * slots in the weight buffer regardless of whether outputtype is adjoint
+             * (e.g. cfg.srcid = -2 forward-only multi-source mode). */
+            int nsrcslots = (mcx_config.extrasrclen > mcx_config.srcnum) ? mcx_config.extrasrclen : mcx_config.srcnum;
+            int ismultislot = (nsrcslots > mcx_config.srcnum);
 
             size_t datalen = (mcx_config.method == rtBLBadouelGrid) ? mcx_config.crop0.z : ( (mcx_config.basisorder) ? mesh.nn : mesh.ne);
             field_dim[0] = nsrcslots;
@@ -1009,9 +1056,12 @@ py::dict pmmc_interface(const py::dict& user_cfg) {
              * In adjoint mode, flux["flux"] has nsrcslots = srcnum+detnum slices (sources then
              * detectors-as-sources), and Jacobians go to output["jmua"], output["jd"], etc. */
             if (mcx_config.method == rtBLBadouelGrid) {
-                /* Adjoint layout: [dim.x, dim.y, dim.z, maxgate, nsrcslots] (nsrcslots last).
-                 * Non-adjoint multi-source layout: [srcnum, dim.x, dim.y, dim.z, maxgate]. */
-                if (isadjoint && nsrcslots > 1) {
+                /* multi-slot layouts use either:
+                 *   detector-adjoint slots (nsrcslots > srcnum; adjoint or srcid==-2 forward):
+                 *       voxel-fastest, gate-middle, slot-slowest -> [..., maxgate, nsrcslots]
+                 *   pattern source (nsrcslots == srcnum > 1):
+                 *       pidx-fastest                             -> [srcnum, ..., maxgate] */
+                if (ismultislot) {
                     array_dims = {(size_t)mcx_config.dim.x, (size_t)mcx_config.dim.y,
                                   (size_t)mcx_config.dim.z, (size_t)mcx_config.maxgate, (size_t)nsrcslots
                                  };
@@ -1025,8 +1075,19 @@ py::dict pmmc_interface(const py::dict& user_cfg) {
                                  };
                 }
             } else {
+                /* mesh-mode layout. Kernel write order:
+                 *   detector-adjoint slots (nsrcslots > srcnum, srcnum==1):
+                 *       field[node + gate*nn + slot*nn*maxgate]  -> shape [datalen, maxgate, nsrcslots]
+                 *   pattern source (nsrcslots == srcnum > 1):
+                 *       field[(gate*ne + eid)*srcnum + pidx]     -> shape [nsrcslots, datalen, maxgate]
+                 *   single source:
+                 *       field[node + gate*nn]                    -> shape [datalen, maxgate] */
                 if (nsrcslots > 1) {
-                    array_dims = {(size_t)nsrcslots, datalen, (size_t)mcx_config.maxgate};
+                    if (ismultislot) {
+                        array_dims = {datalen, (size_t)mcx_config.maxgate, (size_t)nsrcslots};
+                    } else {
+                        array_dims = {(size_t)nsrcslots, datalen, (size_t)mcx_config.maxgate};
+                    }
                 } else {
                     array_dims = {datalen, (size_t)mcx_config.maxgate};
                 }
@@ -1055,19 +1116,29 @@ py::dict pmmc_interface(const py::dict& user_cfg) {
                 output["dref"] = dref_array;
             }
 
-            /* Output adjoint Jacobian in separate dict fields (output["jmua"], output["jd"], etc.) */
-            if (isadjoint && mcx_config.exportjacob && mcx_config.method == rtBLBadouelGrid) {
+            /* Output adjoint Jacobian in separate dict fields (output["jmua"], output["jd"], etc.).
+             * Grid mode: shape [Nx, Ny, Nz, maxgate, Ns*Nd].
+             * Mesh mode (basisorder=1): shape [nn, Ns*Nd] (CW, no maxgate dim). */
+            if (isadjoint && mcx_config.exportjacob) {
                 int Ns = (mcx_config.extrasrclen > mcx_config.detnum) ? (mcx_config.extrasrclen - mcx_config.detnum) : 1;
                 int Nd = (mcx_config.detnum > 0)                      ?  mcx_config.detnum                          : 1;
                 int nsrcpairs = Ns * Nd;
                 int isdual = MCX_IS_DUAL_ADJOINT_TYPE(mcx_config.outputtype);
-                size_t adjlen = (size_t)mcx_config.dim.x * mcx_config.dim.y * mcx_config.dim.z *
-                                mcx_config.maxgate * nsrcpairs;
+                size_t adjlen;
+                std::vector<size_t> jdims;
 
-                std::vector<size_t> jdims = {(size_t)mcx_config.dim.x, (size_t)mcx_config.dim.y,
-                                             (size_t)mcx_config.dim.z, (size_t)mcx_config.maxgate,
-                                             (size_t)nsrcpairs
-                                            };
+                if (mcx_config.method == rtBLBadouelGrid) {
+                    adjlen = (size_t)mcx_config.dim.x * mcx_config.dim.y * mcx_config.dim.z *
+                             mcx_config.maxgate * nsrcpairs;
+                    jdims = {(size_t)mcx_config.dim.x, (size_t)mcx_config.dim.y,
+                             (size_t)mcx_config.dim.z, (size_t)mcx_config.maxgate,
+                             (size_t)nsrcpairs
+                            };
+                } else {
+                    /* mesh mode: nodal output, CW only */
+                    adjlen = (size_t)mesh.nn * nsrcpairs;
+                    jdims = {(size_t)mesh.nn, (size_t)nsrcpairs};
+                }
 
                 const char* jname1 = "jmua";
                 const char* jname2 = "jd";

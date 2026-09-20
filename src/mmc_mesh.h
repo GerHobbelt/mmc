@@ -108,6 +108,9 @@ typedef struct MMC_mesh {
     double* dref;          /**< surface diffuse reflectance */
     float* evol;           /**< volume of an element */
     float* nvol;           /**< voronoi volume of a node */
+    double* deldotdel;     /**< per-element ⟨∇φ_i·∇φ_j⟩*Ve symmetric matrix (upper-triangle
+                                packed, 10 entries per element [d00,d01,d02,d03,d11,d12,d13,d22,d23,d33]);
+                                allocated lazily for mesh-mode adjoint Jacobian */
     float4 nmin;           /**< lower-corner of the mesh bounding box */
     float4 nmax;           /**< upper-corner of the mesh bounding box */
     uint nface;            /**< number of triangular meshes */
@@ -154,7 +157,7 @@ void mesh_build(tetmesh* mesh);
 void mesh_error(const char* msg, const char* file, const int linenum);
 void mesh_filenames(const char* format, char* foutput, mcconfig* cfg);
 void mesh_saveweight(tetmesh* mesh, mcconfig* cfg, int isref);
-void mesh_savejacob(mcconfig* cfg, float* jac, int Ns, int Nd, int isrfforward, int isdual);
+void mesh_savejacob(mcconfig* cfg, tetmesh* mesh, float* jac, int Ns, int Nd, int isrfforward, int isdual);
 void mesh_savedetphoton(float* ppath, void* seeds, int count, int seedbyte, mcconfig* cfg);
 void mesh_getdetimage(float* detmap, float* ppath, int count, mcconfig* cfg, tetmesh* mesh);
 void mesh_savedetimage(float* detmap, mcconfig* cfg);
@@ -168,6 +171,7 @@ int mesh_barycentric(int e0, float* bary, FLOAT3* srcpos, tetmesh* mesh);
 int mesh_initelem(tetmesh* mesh, mcconfig* cfg);
 void mesh_validate(tetmesh* mesh, mcconfig* cfg);
 void mesh_getvolume(tetmesh* mesh, mcconfig* cfg);
+void mesh_deldotdel(tetmesh* mesh);
 
 void tracer_init(raytracer* tracer, tetmesh* mesh, char methodid);
 void tracer_build(raytracer* tracer);

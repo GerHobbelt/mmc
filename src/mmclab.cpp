@@ -433,10 +433,10 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                 int isrfforward = (cfg.omega > 0.f && cfg.seed != SEED_FROM_FILE);
                 int isadjoint = MCX_IS_ADJOINT_TYPE(cfg.outputtype);
 
-                /* In adjoint mode the weight buffer has nsrcslots = extrasrclen = Ns+Nd slots;
-                 * otherwise it is simply cfg.srcnum. The GPU layout for adjoint is
-                 * [dim.x, dim.y, dim.z, maxgate, nsrcslots] (slot index slowest). */
-                int nsrcslots = (isadjoint && cfg.extrasrclen > cfg.srcnum) ? cfg.extrasrclen : cfg.srcnum;
+                /* When extrasrclen exceeds srcnum, the kernel runs nsrcslots = extrasrclen
+                 * slots in the weight buffer regardless of whether outputtype is adjoint
+                 * (e.g. cfg.srcid = -2 forward-only multi-source mode). */
+                int nsrcslots = (cfg.extrasrclen > cfg.srcnum) ? cfg.extrasrclen : cfg.srcnum;
 
                 int datalen = (cfg.method == rtBLBadouelGrid) ? cfg.crop0.z : ( (cfg.basisorder) ? mesh.nn : mesh.ne);
                 fielddim[0] = nsrcslots;
@@ -448,10 +448,15 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                 /* Always output forward fluence in flux.data.
                  * In adjoint mode, flux.data has nsrcslots = srcnum+detnum slices (sources then
                  * detectors-as-sources), and the Jacobian is returned separately in flux.jmua/jd/etc. */
+                /* multi-slot layouts use either:
+                 *   detector-adjoint slots (nsrcslots > srcnum; adjoint or srcid==-2 forward):
+                 *       voxel-fastest, gate-middle, slot-slowest  ->  [..., maxgate, nsrcslots]
+                 *   pattern source (nsrcslots == srcnum > 1):
+                 *       pidx-fastest                             ->  [srcnum, ..., maxgate] */
+                int ismultislot = (nsrcslots > cfg.srcnum);
+
                 if (cfg.method == rtBLBadouelGrid) {
-                    /* Adjoint layout: [dim.x, dim.y, dim.z, maxgate, nsrcslots] (nsrcslots last).
-                     * Non-adjoint multi-source layout: [srcnum, dim.x, dim.y, dim.z, maxgate]. */
-                    if (isadjoint && nsrcslots > 1) {
+                    if (ismultislot) {
                         fielddim[0] = cfg.dim.x;
                         fielddim[1] = cfg.dim.y;
                         fielddim[2] = cfg.dim.z;
@@ -467,16 +472,33 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
 
                     mxComplexity cplx = (isrfforward && cfg.exportadjoint) ? mxCOMPLEX : mxREAL;
 
-                    if (isadjoint && nsrcslots > 1) {
-                        mxSetFieldByNumber(plhs[0], jstruct, 0, mmclab_assert(mxCreateNumericArray(5, fielddim, mxDOUBLE_CLASS, cplx)));
-                    } else if (cfg.srcnum > 1) {
+                    if (ismultislot || cfg.srcnum > 1) {
                         mxSetFieldByNumber(plhs[0], jstruct, 0, mmclab_assert(mxCreateNumericArray(5, fielddim, mxDOUBLE_CLASS, cplx)));
                     } else {
                         mxSetFieldByNumber(plhs[0], jstruct, 0, mmclab_assert(mxCreateNumericArray(4, &fielddim[1], mxDOUBLE_CLASS, cplx)));
                     }
                 } else {
+                    /* mesh-mode layout. Kernel write order:
+                     *   detector-adjoint slots (nsrcslots > srcnum, srcnum==1):
+                     *       field[node + gate*nn + slot*nn*maxgate]  -> dims [datalen, maxgate, nsrcslots]
+                     *   pattern source (nsrcslots == srcnum > 1):
+                     *       field[(gate*ne + eid)*srcnum + pidx]     -> dims [nsrcslots, datalen, maxgate]
+                     *   single source:
+                     *       field[node + gate*nn]                    -> dims [datalen, maxgate] */
                     if (nsrcslots > 1) {
-                        mxSetFieldByNumber(plhs[0], jstruct, 0, mmclab_assert(mxCreateNumericArray(3, fielddim, mxDOUBLE_CLASS, mxREAL)));
+                        dimtype meshfielddim[3];
+
+                        if (ismultislot) {
+                            meshfielddim[0] = datalen;
+                            meshfielddim[1] = cfg.maxgate;
+                            meshfielddim[2] = nsrcslots;
+                        } else {
+                            meshfielddim[0] = nsrcslots;
+                            meshfielddim[1] = datalen;
+                            meshfielddim[2] = cfg.maxgate;
+                        }
+
+                        mxSetFieldByNumber(plhs[0], jstruct, 0, mmclab_assert(mxCreateNumericArray(3, meshfielddim, mxDOUBLE_CLASS, mxREAL)));
                     } else {
                         mxSetFieldByNumber(plhs[0], jstruct, 0, mmclab_assert(mxCreateNumericArray(2, &fielddim[1], mxDOUBLE_CLASS, mxREAL)));
                     }
@@ -530,20 +552,36 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                     memcpy((double*)mxGetPr(mxGetFieldByNumber(plhs[0], jstruct, 1)), mesh.dref, fielddim[1]*fielddim[2]*sizeof(double));
                 }
 
-                /* Output adjoint Jacobian in separate struct fields (flux.jmua, flux.jd, etc.) */
-                if (isadjoint && cfg.exportjacob && cfg.method == rtBLBadouelGrid) {
+                /* Output adjoint Jacobian in separate struct fields (flux.jmua, flux.jd, etc.).
+                 * Grid mode: shape [Nx, Ny, Nz, maxgate, Ns*Nd].
+                 * Mesh mode (basisorder=1): shape [nn, Ns*Nd] (CW, no maxgate dim). */
+                if (isadjoint && cfg.exportjacob) {
                     int Ns = (cfg.extrasrclen > cfg.detnum) ? (cfg.extrasrclen - cfg.detnum) : 1;
                     int Nd = (cfg.detnum > 0)               ?  cfg.detnum                   : 1;
                     int nsrcpairs = Ns * Nd;
                     int isdual = MCX_IS_DUAL_ADJOINT_TYPE(cfg.outputtype);
                     mxComplexity jcplx = isrfforward ? mxCOMPLEX : mxREAL;
-                    size_t adjlen = (size_t)cfg.dim.x * cfg.dim.y * cfg.dim.z * cfg.maxgate * nsrcpairs;
+                    int jndim;
+                    size_t adjlen;
 
-                    fielddim[0] = cfg.dim.x;
-                    fielddim[1] = cfg.dim.y;
-                    fielddim[2] = cfg.dim.z;
-                    fielddim[3] = cfg.maxgate;
-                    fielddim[4] = nsrcpairs;
+                    if (cfg.method == rtBLBadouelGrid) {
+                        adjlen = (size_t)cfg.dim.x * cfg.dim.y * cfg.dim.z * cfg.maxgate * nsrcpairs;
+                        fielddim[0] = cfg.dim.x;
+                        fielddim[1] = cfg.dim.y;
+                        fielddim[2] = cfg.dim.z;
+                        fielddim[3] = cfg.maxgate;
+                        fielddim[4] = nsrcpairs;
+                        jndim = 5;
+                    } else {
+                        /* mesh mode: nodal output, CW only */
+                        adjlen = (size_t)mesh.nn * nsrcpairs;
+                        fielddim[0] = mesh.nn;
+                        fielddim[1] = nsrcpairs;
+                        fielddim[2] = 0;
+                        fielddim[3] = 0;
+                        fielddim[4] = 0;
+                        jndim = 2;
+                    }
 
                     /* Determine Jacobian field name(s) based on output type */
                     const char* jname1 = "jmua";
@@ -586,7 +624,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                             mxAddField(plhs[0], fname);
                         }
 
-                        mxArray* jfield = mmclab_assert(mxCreateNumericArray(5, fielddim, mxSINGLE_CLASS, jcplx));
+                        mxArray* jfield = mmclab_assert(mxCreateNumericArray(jndim, fielddim, mxSINGLE_CLASS, jcplx));
 
                         if (!isrfforward) {
                             memcpy((float*)mxGetData(jfield), re_data, adjlen * sizeof(float));
@@ -704,6 +742,10 @@ void mmc_set_field(const mxArray* root, const mxArray* item, int idx, mcconfig* 
     GET_ONE_FIELD(cfg, mcmethod)
     GET_ONE_FIELD(cfg, maxdetphoton)
     GET_ONE_FIELD(cfg, maxjumpdebug)
+    GET_ONE_FIELD(cfg, srcid)
+    GET_ONE_FIELD(cfg, adjointmode)
+    GET_ONE_FIELD(cfg, isnodalmua)
+    GET_ONE_FIELD(cfg, isnodalmusp)
     GET_VEC3_FIELD(cfg, srcpos)
     GET_VEC34_FIELD(cfg, srcdir)
     GET_VEC3_FIELD(cfg, steps)
@@ -1142,6 +1184,59 @@ void mmc_set_field(const mxArray* root, const mxArray* item, int idx, mcconfig* 
             }
 
         printf("mmc.detdir=[%d,4];\n", nd);
+    } else if (strcmp(name, "nodemua") == 0) {
+        /* per-node absorption coefficient array, length mesh.nn; auto-sets isnodalmua.
+         * Accepts double or single precision input (matlab default vs. explicit single()). */
+        arraydim = mxGetDimensions(item);
+        int nn = (int)(arraydim[0] * arraydim[1]);
+
+        if (cfg->nodemua) {
+            free(cfg->nodemua);
+        }
+
+        cfg->nodemua = (float*)malloc(nn * sizeof(float));
+
+        if (mxIsDouble(item)) {
+            double* val = mxGetPr(item);
+
+            for (i = 0; i < nn; i++) {
+                cfg->nodemua[i] = (float)val[i];
+            }
+        } else if (mxIsSingle(item)) {
+            float* val = (float*)mxGetData(item);
+            memcpy(cfg->nodemua, val, nn * sizeof(float));
+        } else {
+            MEXERROR("cfg.nodemua must be a double or single-precision array");
+        }
+
+        cfg->isnodalmua = 1;
+        printf("mmc.nodemua=[%d,1];\n", nn);
+    } else if (strcmp(name, "nodemusp") == 0) {
+        /* per-node reduced scattering coefficient, length mesh.nn; auto-sets isnodalmusp. */
+        arraydim = mxGetDimensions(item);
+        int nn = (int)(arraydim[0] * arraydim[1]);
+
+        if (cfg->nodemusp) {
+            free(cfg->nodemusp);
+        }
+
+        cfg->nodemusp = (float*)malloc(nn * sizeof(float));
+
+        if (mxIsDouble(item)) {
+            double* val = mxGetPr(item);
+
+            for (i = 0; i < nn; i++) {
+                cfg->nodemusp[i] = (float)val[i];
+            }
+        } else if (mxIsSingle(item)) {
+            float* val = (float*)mxGetData(item);
+            memcpy(cfg->nodemusp, val, nn * sizeof(float));
+        } else {
+            MEXERROR("cfg.nodemusp must be a double or single-precision array");
+        }
+
+        cfg->isnodalmusp = 1;
+        printf("mmc.nodemusp=[%d,1];\n", nn);
     } else if (strcmp(name, "compute") == 0) {
         int len = mxGetNumberOfElements(item);
         const char* computebackend[] = {"sse", "opencl", "cuda", "optix", ""};

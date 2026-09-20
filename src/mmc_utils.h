@@ -307,6 +307,19 @@ typedef struct MMC_config {
     int srcid;                    /**<multi-source selector: 0=merge all (default), -1=run each slot separately,
                                        -2=append detectors as adjoint sources without forcing adjoint output,
                                        N>0=run only the N-th source*/
+    char adjointmode;             /**<mesh-mode adjoint Jacobian formula: 0=full FEM (default, rb_femjacobian
+                                       formula with -0.1*Ve diag + 0.5*off-diag), 1=nodal approximation
+                                       (J_mua_n = -nvol*phi_s*phi_d, rbjacmuafast.m). Affects J_mua only;
+                                       J_D always uses the full FEM form.*/
+    float* nodemua;               /**<optional per-node mua array, length mesh.nn; when set together with
+                                       isnodalmua=1 the kernel reads mua per element from the centroid of
+                                       these node values instead of gmed[type]. Used by redbird/DOT recon.*/
+    float* nodemusp;              /**<optional per-node musp array, length mesh.nn; required for RF/D-coeff
+                                       reconstruction along with nodemua (isnodalmusp=1). g is fixed to the
+                                       per-tissue gmed[type] value; n is also taken from gmed[type].*/
+    char isnodalmua;              /**<1: enable per-node mua via cfg.nodemua (CW or RF DOT recon).*/
+    char isnodalmusp;             /**<1: also enable per-node musp via cfg.nodemusp (RF DOT recon).
+                                       Requires isnodalmua=1.*/
     double* energytot;             /**<total energy launched for each source, a buffer of length srcnum */
     double* energyesc;             /**<total energy escaped for each source, a buffer of length srcnum */
     unsigned int detectedcount;    /**<total number of detected photons*/

@@ -217,6 +217,9 @@ void mmc_run_simulation(mcconfig* cfg, tetmesh* mesh, raytracer* tracer, GPUInfo
     int4* gelem, *gfacenb;
     float4* gnormal;
     int* gtype, *gsrcelem;
+    /* per-node optical property arrays for DOT reconstruction (NULL when unused) */
+    float* gnodemua_cu = NULL;
+    float* gnodemusp_cu = NULL;
     uint* gseed, *gdetected;
     volatile int* progress, *gprogress;
     float* gweight, *gdref, *gdetphoton, *genergy, *gsrcpattern, *gdebugdata;
@@ -225,8 +228,9 @@ void mmc_run_simulation(mcconfig* cfg, tetmesh* mesh, raytracer* tracer, GPUInfo
 
     MCXReporter* greporter;
     int isrfforward = (cfg->omega > 0.f && cfg->seed != SEED_FROM_FILE);
-    /* For adjoint/multi-source mode, expand meshlen to cover all source slots */
-    uint nsrcslots = (cfg->extrasrclen > 0) ? (uint)cfg->extrasrclen : 1u;
+    /* For adjoint/multi-source mode, expand meshlen to cover all source slots.
+     * cfg->srcid > 0 selects a single slot from srcdata, so the field buffer collapses to one slot. */
+    uint nsrcslots = (cfg->extrasrclen > 0 && cfg->srcid <= 0) ? (uint)cfg->extrasrclen : 1u;
     uint meshlen = ((cfg->method == rtBLBadouelGrid) ? cfg->crop0.z : mesh->ne) * cfg->srcnum * nsrcslots;
     cfg->crop0.w = meshlen * cfg->maxgate; // offset for the second (double) buffer
 
@@ -293,7 +297,7 @@ void mmc_run_simulation(mcconfig* cfg, tetmesh* mesh, raytracer* tracer, GPUInfo
         cfg->maxjumpdebug,
         cfg->omega,
         (float)(3.335640951981520e-12),   /* oneoverc0 = 1/C0 in s/mm */
-        (cfg->extrasrclen > 0 && cfg->srcid >= 0) ? -1 : cfg->srcid,  /* srcid < 0 triggers multi-source mode */
+        (cfg->extrasrclen > 0 && cfg->srcid == 0) ? -1 : cfg->srcid,  /* srcid<0 multi-slot, srcid>0 single slot, srcid==0 with srcdata: auto-promote to -1 */
         cfg->extrasrclen,
         (int)(mesh->prop + 1 + cfg->isextdet)  /* srcpropoffset: gmed index where extra sources start */
     };
@@ -466,6 +470,19 @@ void mmc_run_simulation(mcconfig* cfg, tetmesh* mesh, raytracer* tracer, GPUInfo
     CUDA_ASSERT(cudaMalloc((void**)&gnormal, sizeof(float4) * (mesh->ne) * 4));
     CUDA_ASSERT(cudaMemcpy(gnormal, tracer->n, sizeof(float4) * (mesh->ne) * 4,
                            cudaMemcpyHostToDevice));
+
+    /* upload per-node mua/musp for DOT reconstruction modes (size mesh->nn) */
+    if (cfg->isnodalmua && cfg->nodemua) {
+        CUDA_ASSERT(cudaMalloc((void**)&gnodemua_cu, sizeof(float) * (mesh->nn)));
+        CUDA_ASSERT(cudaMemcpy(gnodemua_cu, cfg->nodemua, sizeof(float) * (mesh->nn),
+                               cudaMemcpyHostToDevice));
+    }
+
+    if (cfg->isnodalmusp && cfg->nodemusp) {
+        CUDA_ASSERT(cudaMalloc((void**)&gnodemusp_cu, sizeof(float) * (mesh->nn)));
+        CUDA_ASSERT(cudaMemcpy(gnodemusp_cu, cfg->nodemusp, sizeof(float) * (mesh->nn),
+                               cudaMemcpyHostToDevice));
+    }
 
     // gparam
     CUDA_ASSERT(cudaMemcpyToSymbol(gcfg, &param, sizeof(MCXParam), 0, cudaMemcpyHostToDevice));
@@ -642,11 +659,35 @@ void mmc_run_simulation(mcconfig* cfg, tetmesh* mesh, raytracer* tracer, GPUInfo
             param.tend = twindow1;
 
 
-            mmc_main_loop <<< mcgrid, mcblock, sharedmemsize>>>(
-                threadphoton, oddphotons, gnode, (int*)gelem, gweight, gdref,
-                gtype, (int*)gfacenb, gsrcelem, gnormal,
-                gdetphoton, gdetected, gseed, (int*)gprogress, genergy, greporter,
-                gsrcpattern, greplayweight, greplaytime, greplayseed, gphotonseed, gdebugdata);
+            /* Three valid template variants for cfg.isnodalmua/isnodalmusp:
+             *   (0,0): default, all properties from gmed[type] (constant mem)
+             *   (1,0): per-node mua via gnodemua_cu (CW DOT recon)
+             *   (1,1): per-node mua + musp via gnodemua_cu + gnodemusp_cu (RF DOT recon)
+             * isnodalmusp=1 without isnodalmua=1 is rejected during prep. */
+            int nodevariant = (cfg->isnodalmua ? 1 : 0) | (cfg->isnodalmusp ? 2 : 0);
+
+            if (nodevariant == 3) {
+                mmc_main_loop<1, 1> <<< mcgrid, mcblock, sharedmemsize>>>(
+                    threadphoton, oddphotons, gnode, (int*)gelem, gweight, gdref,
+                    gtype, (int*)gfacenb, gsrcelem, gnormal,
+                    gnodemua_cu, gnodemusp_cu,
+                    gdetphoton, gdetected, gseed, (int*)gprogress, genergy, greporter,
+                    gsrcpattern, greplayweight, greplaytime, greplayseed, gphotonseed, gdebugdata);
+            } else if (nodevariant == 1) {
+                mmc_main_loop<1, 0> <<< mcgrid, mcblock, sharedmemsize>>>(
+                    threadphoton, oddphotons, gnode, (int*)gelem, gweight, gdref,
+                    gtype, (int*)gfacenb, gsrcelem, gnormal,
+                    gnodemua_cu, NULL,
+                    gdetphoton, gdetected, gseed, (int*)gprogress, genergy, greporter,
+                    gsrcpattern, greplayweight, greplaytime, greplayseed, gphotonseed, gdebugdata);
+            } else {
+                mmc_main_loop<0, 0> <<< mcgrid, mcblock, sharedmemsize>>>(
+                    threadphoton, oddphotons, gnode, (int*)gelem, gweight, gdref,
+                    gtype, (int*)gfacenb, gsrcelem, gnormal,
+                    NULL, NULL,
+                    gdetphoton, gdetected, gseed, (int*)gprogress, genergy, greporter,
+                    gsrcpattern, greplayweight, greplaytime, greplayseed, gphotonseed, gdebugdata);
+            }
 
             #pragma omp master
             {
@@ -937,6 +978,216 @@ are more than what your have specified (%d), please use the --maxjumpdebug optio
             }
         }
 
+        /* Mesh-mode adjoint Jacobian post-processing: FEM/nodal formulas on tet mesh.
+         * Requires basisorder=1 (nodal fluence) so phi values are well-defined per node.
+         * J_mua: either full FEM (rb_femjacobian) or nodal approximation (rbjacmuafast).
+         * J_D:   always full FEM (no nodal-approx form). */
+        if (cfg->issave2pt && MCX_IS_ADJOINT_TYPE(cfg->outputtype) && cfg->method != rtBLBadouelGrid &&
+                cfg->basisorder && cfg->extrasrclen > 0 && cfg->detdir != NULL && cfg->exportfield) {
+            unsigned int Ns = (unsigned int)(cfg->extrasrclen - cfg->detnum);
+            unsigned int Nd = (unsigned int)cfg->detnum;
+            int isdual  = MCX_IS_DUAL_ADJOINT_TYPE(cfg->outputtype);
+            int isnodal_approx = (cfg->adjointmode == 1);    /* nodal-adjoint approximation */
+            /* output domain: node-based for both basisorder=1 full FEM (after elem→node scatter)
+             * and the nodal approximation; element-based not currently exposed in mesh mode */
+            unsigned int datalen = (unsigned int)mesh->nn;
+            size_t adjointlen = (size_t)datalen * Ns * Nd;
+            size_t single_exportlen = adjointlen * (isrfforward ? 2 : 1);
+            size_t exportlen_adj    = single_exportlen * (isdual ? 2 : 1);
+
+            /* Convert double exportfield to float for GPU processing */
+            float* hfield_re = (float*)malloc(sizeof(float) * fieldlen);
+            float* hfield_im = isrfforward ? (float*)malloc(sizeof(float) * fieldlen) : NULL;
+
+            for (size_t k = 0; k < fieldlen; k++) {
+                hfield_re[k] = (float)cfg->exportfield[k];
+            }
+
+            if (isrfforward && cfg->exportadjoint) {
+                for (size_t k = 0; k < fieldlen; k++) {
+                    hfield_im[k] = cfg->exportadjoint[k];
+                }
+            }
+
+            float* gfield_re_cu = NULL, *gfield_im_cu = NULL;
+            float* gjmua_cu = NULL, *gjd_cu = NULL;
+            CUDA_ASSERT(cudaMalloc((void**)&gfield_re_cu, sizeof(float) * fieldlen));
+            CUDA_ASSERT(cudaMemcpy(gfield_re_cu, hfield_re, sizeof(float) * fieldlen, cudaMemcpyHostToDevice));
+            free(hfield_re);
+
+            if (hfield_im) {
+                CUDA_ASSERT(cudaMalloc((void**)&gfield_im_cu, sizeof(float) * fieldlen));
+                CUDA_ASSERT(cudaMemcpy(gfield_im_cu, hfield_im, sizeof(float) * fieldlen, cudaMemcpyHostToDevice));
+                free(hfield_im);
+            }
+
+            /* Upload mesh helpers (elem, evol, deldotdel, nvol) to device */
+            int* gelem_jac = NULL;
+            float* gevol_jac = NULL;
+            float* gdeldotdel_jac = NULL;
+            float* gnvol_jac = NULL;
+            int compute_jmua = (cfg->outputtype == otAdjoint || isdual);
+            int compute_jd   = (cfg->outputtype == otAdjointDcoeff || isdual);
+
+            /* upload elem (int4 -> int*) */
+            CUDA_ASSERT(cudaMalloc((void**)&gelem_jac, sizeof(int) * mesh->ne * mesh->elemlen));
+            CUDA_ASSERT(cudaMemcpy(gelem_jac, mesh->elem, sizeof(int) * mesh->ne * mesh->elemlen, cudaMemcpyHostToDevice));
+
+            /* upload evol */
+            CUDA_ASSERT(cudaMalloc((void**)&gevol_jac, sizeof(float) * mesh->ne));
+            CUDA_ASSERT(cudaMemcpy(gevol_jac, mesh->evol, sizeof(float) * mesh->ne, cudaMemcpyHostToDevice));
+
+            if (compute_jd || !isnodal_approx) {
+                /* deldotdel needed for J_D (always) and for full-FEM J_mua */
+                if (mesh->deldotdel == NULL) {
+                    mesh_deldotdel(mesh);
+                }
+
+                float* deldotdel_f = (float*)malloc(sizeof(float) * mesh->ne * 10);
+
+                for (size_t k = 0; k < (size_t)mesh->ne * 10; k++) {
+                    deldotdel_f[k] = (float)mesh->deldotdel[k];
+                }
+
+                CUDA_ASSERT(cudaMalloc((void**)&gdeldotdel_jac, sizeof(float) * mesh->ne * 10));
+                CUDA_ASSERT(cudaMemcpy(gdeldotdel_jac, deldotdel_f, sizeof(float) * mesh->ne * 10, cudaMemcpyHostToDevice));
+                free(deldotdel_f);
+            }
+
+            if (isnodal_approx && compute_jmua) {
+                CUDA_ASSERT(cudaMalloc((void**)&gnvol_jac, sizeof(float) * mesh->nn));
+                CUDA_ASSERT(cudaMemcpy(gnvol_jac, mesh->nvol, sizeof(float) * mesh->nn, cudaMemcpyHostToDevice));
+            }
+
+            if (compute_jmua) {
+                CUDA_ASSERT(cudaMalloc((void**)&gjmua_cu, sizeof(float) * single_exportlen));
+                CUDA_ASSERT(cudaMemset(gjmua_cu, 0, sizeof(float) * single_exportlen));
+            }
+
+            if (compute_jd) {
+                CUDA_ASSERT(cudaMalloc((void**)&gjd_cu, sizeof(float) * single_exportlen));
+                CUDA_ASSERT(cudaMemset(gjd_cu, 0, sizeof(float) * single_exportlen));
+            }
+
+            size_t adjblocksize = 256;
+
+            if (isnodal_approx && compute_jmua) {
+                /* nodal approximation J_mua kernel: one thread per node */
+                size_t adjgridsize = ((size_t)mesh->nn + adjblocksize - 1) / adjblocksize;
+                mmc_adjoint_mesh_nodal_kernel <<< (unsigned int)adjgridsize, (unsigned int)adjblocksize>>>(
+                    gfield_re_cu, gfield_im_cu, gnvol_jac, gjmua_cu,
+                    (unsigned int)mesh->nn, (unsigned int)cfg->maxgate, Ns, Nd);
+                CUDA_ASSERT(cudaDeviceSynchronize());
+            }
+
+            if ((!isnodal_approx && compute_jmua) || compute_jd) {
+                /* full FEM kernel: one thread per element; nodal output via atomic scatter */
+                size_t adjgridsize = ((size_t)mesh->ne + adjblocksize - 1) / adjblocksize;
+                mmc_adjoint_mesh_full_kernel <<< (unsigned int)adjgridsize, (unsigned int)adjblocksize>>>(
+                    gfield_re_cu, gfield_im_cu,
+                    gelem_jac, gevol_jac, gdeldotdel_jac,
+                    (isnodal_approx ? NULL : gjmua_cu),  /* skip J_mua here if nodal-approx already ran */
+                    gjd_cu,
+                    (unsigned int)mesh->ne, (unsigned int)mesh->nn, (unsigned int)cfg->maxgate,
+                    Ns, Nd, (unsigned int)mesh->elemlen,
+                    /*isnodal*/ 1);
+                CUDA_ASSERT(cudaDeviceSynchronize());
+            }
+
+            CUDA_ASSERT(cudaFree(gfield_re_cu));
+
+            if (gfield_im_cu) {
+                CUDA_ASSERT(cudaFree(gfield_im_cu));
+            }
+
+            CUDA_ASSERT(cudaFree(gelem_jac));
+            CUDA_ASSERT(cudaFree(gevol_jac));
+
+            if (gdeldotdel_jac) {
+                CUDA_ASSERT(cudaFree(gdeldotdel_jac));
+            }
+
+            if (gnvol_jac) {
+                CUDA_ASSERT(cudaFree(gnvol_jac));
+            }
+
+            /* Allocate output buffer and copy back */
+            if (cfg->exportjacob) {
+                free(cfg->exportjacob);
+            }
+
+            cfg->exportjacob = (float*)malloc(sizeof(float) * exportlen_adj);
+            memset(cfg->exportjacob, 0, sizeof(float) * exportlen_adj);
+
+            /* Photon dilution correction: each slot got nphoton/(Ns+Nd) photons with
+             * srcpos.w = 1/Ns or 1/Nd; restore unit-energy magnitudes. */
+            float jac_correction = 4.f * (float)Ns * (float)Nd;
+
+            float* hmua = NULL, *hjd = NULL;
+
+            if (compute_jmua) {
+                hmua = (float*)malloc(sizeof(float) * single_exportlen);
+                CUDA_ASSERT(cudaMemcpy(hmua, gjmua_cu, sizeof(float) * single_exportlen, cudaMemcpyDeviceToHost));
+                CUDA_ASSERT(cudaFree(gjmua_cu));
+
+                for (size_t k = 0; k < single_exportlen; k++) {
+                    hmua[k] *= jac_correction;    /* sign + Ve / nvol already in kernel */
+                }
+            }
+
+            if (compute_jd) {
+                hjd = (float*)malloc(sizeof(float) * single_exportlen);
+                CUDA_ASSERT(cudaMemcpy(hjd, gjd_cu, sizeof(float) * single_exportlen, cudaMemcpyDeviceToHost));
+                CUDA_ASSERT(cudaFree(gjd_cu));
+
+                for (size_t k = 0; k < single_exportlen; k++) {
+                    hjd[k] *= jac_correction;
+                }
+            }
+
+            /* Pack into cfg->exportjacob using same layout as grid path:
+             *   CW non-dual:    [Re_J1]
+             *   CW dual:        [Re_J1, Re_J2]
+             *   RF non-dual:    [Re_J1, Im_J1]
+             *   RF dual:        [Re_J1, Re_J2, Im_J1, Im_J2] */
+            if (isdual) {
+                if (!isrfforward) {
+                    memcpy(cfg->exportjacob,              hmua, adjointlen * sizeof(float));
+                    memcpy(cfg->exportjacob + adjointlen, hjd,  adjointlen * sizeof(float));
+                } else {
+                    memcpy(cfg->exportjacob,                  hmua,              adjointlen * sizeof(float));
+                    memcpy(cfg->exportjacob + adjointlen,     hjd,               adjointlen * sizeof(float));
+                    memcpy(cfg->exportjacob + 2 * adjointlen, hmua + adjointlen, adjointlen * sizeof(float));
+                    memcpy(cfg->exportjacob + 3 * adjointlen, hjd + adjointlen,  adjointlen * sizeof(float));
+                }
+            } else {
+                float* hsrc = compute_jmua ? hmua : hjd;
+                memcpy(cfg->exportjacob, hsrc, single_exportlen * sizeof(float));
+            }
+
+            if (hmua) {
+                free(hmua);
+            }
+
+            if (hjd) {
+                free(hjd);
+            }
+
+            MMC_FPRINTF(cfg->flog, "mesh adjoint Jacobian computation complete (%s): %d ms\n",
+                        isnodal_approx ? "nodal approx" : "full FEM", GetTimeMillis() - tic);
+
+#ifndef MCX_CONTAINER
+
+            if (cfg->issave2pt && cfg->parentid == mpStandalone && cfg->exportjacob) {
+                MMC_FPRINTF(cfg->flog, "saving mesh adjoint Jacobian to file ...\t");
+                mesh_savejacob(cfg, mesh, cfg->exportjacob, (int)Ns, (int)Nd, isrfforward, isdual);
+                MMC_FPRINTF(cfg->flog, "saving Jacobian complete : %d ms\n\n", GetTimeMillis() - tic);
+                mcx_fflush(cfg->flog);
+            }
+
+#endif
+        }
+
         /* Adjoint Jacobian post-processing (grid mode only) */
         if (cfg->issave2pt && MCX_IS_ADJOINT_TYPE(cfg->outputtype) && cfg->method == rtBLBadouelGrid &&
                 cfg->extrasrclen > 0 && cfg->detdir != NULL && cfg->exportfield) {
@@ -1063,7 +1314,7 @@ are more than what your have specified (%d), please use the --maxjumpdebug optio
 
             if (cfg->issave2pt && cfg->parentid == mpStandalone && cfg->exportjacob) {
                 MMC_FPRINTF(cfg->flog, "saving adjoint Jacobian to file ...\t");
-                mesh_savejacob(cfg, cfg->exportjacob, (int)Ns, (int)Nd, isrfforward, isdual);
+                mesh_savejacob(cfg, mesh, cfg->exportjacob, (int)Ns, (int)Nd, isrfforward, isdual);
                 MMC_FPRINTF(cfg->flog, "saving Jacobian complete : %d ms\n\n", GetTimeMillis() - tic);
                 mcx_fflush(cfg->flog);
             }
@@ -1137,6 +1388,15 @@ are more than what your have specified (%d), please use the --maxjumpdebug optio
     CUDA_ASSERT(cudaFree(gfacenb));
     CUDA_ASSERT(cudaFree(gsrcelem));
     CUDA_ASSERT(cudaFree(gnormal));
+
+    if (gnodemua_cu) {
+        CUDA_ASSERT(cudaFree(gnodemua_cu));
+    }
+
+    if (gnodemusp_cu) {
+        CUDA_ASSERT(cudaFree(gnodemusp_cu));
+    }
+
     CUDA_ASSERT(cudaFree(gseed));
     CUDA_ASSERT(cudaFree(gdetphoton));
     CUDA_ASSERT(cudaFree(gweight));

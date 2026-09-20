@@ -271,6 +271,11 @@ void mcx_initcfg(mcconfig* cfg) {
     cfg->extrasrclen = 0;
     cfg->srcdata = NULL;
     cfg->srcid = 0;
+    cfg->adjointmode = 0;
+    cfg->nodemua = NULL;
+    cfg->nodemusp = NULL;
+    cfg->isnodalmua = 0;
+    cfg->isnodalmusp = 0;
     cfg->detdir = NULL;
     cfg->exportadjoint = NULL;
     cfg->exportjacob = NULL;
@@ -426,6 +431,16 @@ void mcx_clearcfg(mcconfig* cfg) {
     if (cfg->detdir) {
         free(cfg->detdir);
         cfg->detdir = NULL;
+    }
+
+    if (cfg->nodemua) {
+        free(cfg->nodemua);
+        cfg->nodemua = NULL;
+    }
+
+    if (cfg->nodemusp) {
+        free(cfg->nodemusp);
+        cfg->nodemusp = NULL;
     }
 
     if (cfg->flog && cfg->flog != stdout && cfg->flog != stderr) {
@@ -1049,6 +1064,10 @@ void mcx_savejdet(float* ppath, void* seeds, uint count, int doappend, mcconfig*
                 void* val = NULL;
                 float* fbuf = NULL;
                 uint*  ibuf = NULL;
+                /* multi-source kernel packs the source slot id (1-based) into the upper
+                 * 16 bits of the detid column; split it out into a separate 'srcid' field
+                 * when emitting JSON so downstream readers see a clean detector id. */
+                int hassrcid = ((cfg->extrasrclen > 1) && id == 0);
 
                 if (!strcmp(dtype[id], "uint32")) {
                     ibuf = (uint*)calloc(dims[0] * dims[1], sizeof(uint));
@@ -1068,6 +1087,23 @@ void mcx_savejdet(float* ppath, void* seeds, uint count, int doappend, mcconfig*
                         }
 
                     val = (void*)fbuf;
+                }
+
+                if (hassrcid) {
+                    uint* srcid = (uint*)calloc(dims[0] * dims[1], sizeof(uint));
+
+                    for (i = 0; i < (int)(dims[0] * dims[1]); i++) {
+                        srcid[i] = ibuf[i] >> 16;
+                        ibuf[i] &= 0xFFFF;
+                    }
+
+                    cJSON_AddItemToObject(dat, "srcid", sub = cJSON_CreateObject());
+
+                    if (mcx_jdataencode((void*)srcid, 2, dims, dtype[id], 4, cfg->zipid, sub, 0, 1, cfg)) {
+                        MMC_ERROR(-1, "error when converting to JSON");
+                    }
+
+                    free(srcid);
                 }
 
                 cJSON_AddItemToObject(dat, dname[id], sub = cJSON_CreateObject());
@@ -1243,6 +1279,7 @@ void mcx_savejdb(float* ppath, void* seeds, uint count, int doappend, mcconfig* 
                 void* val = NULL;
                 float* fbuf = NULL;
                 uint*  ibuf = NULL;
+                int hassrcid = ((cfg->extrasrclen > 1) && id == 0);
 
                 if (!strcmp(dtype[id], "uint32")) {
                     ibuf = (uint*)calloc(dims[0] * dims[1], sizeof(uint));
@@ -1262,6 +1299,25 @@ void mcx_savejdb(float* ppath, void* seeds, uint count, int doappend, mcconfig* 
                         }
 
                     val = (void*)fbuf;
+                }
+
+                if (hassrcid) {
+                    uint* srcid = (uint*)calloc(dims[0] * dims[1], sizeof(uint));
+
+                    for (i = 0; i < (int)(dims[0] * dims[1]); i++) {
+                        srcid[i] = ibuf[i] >> 16;
+                        ibuf[i] &= 0xFFFF;
+                    }
+
+                    ubjw_write_key(root, "srcid");
+                    ubjw_begin_object(root, UBJ_MIXED, 0);
+
+                    if (mcx_jdataencode((void*)srcid, 2, dims, dtype[id], 4, cfg->zipid, root, 1, 1, cfg)) {
+                        MMC_ERROR(-1, "error when converting to JSON");
+                    }
+
+                    ubjw_end(root);
+                    free(srcid);
                 }
 
                 ubjw_write_key(root, dname[id]);
@@ -1757,15 +1813,66 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
         if (src) {
             subitem = FIND_JSON_OBJ("Pos", "Optode.Source.Pos", src);
 
-            if (subitem) {
+            if (subitem && cJSON_IsArray(subitem)) {
+                /* Multi-source: Pos can be a 2D array [[x,y,z,w],...]; first row is
+                 * cfg->srcpos, remaining rows populate cfg->srcdata[0..N-1]. */
+                if (cJSON_IsArray(subitem->child)) {
+                    if (cfg->srcdata && cfg->extrasrclen != cJSON_GetArraySize(subitem) - 1) {
+                        MMC_ERROR(-1, "Length of sub-elements of Pos/Dir/Param1/Param2 must match");
+                    }
+
+                    if (cfg->srcdata == NULL) {
+                        cfg->extrasrclen = cJSON_GetArraySize(subitem) - 1;
+                    }
+
+                    subitem = subitem->child;
+                }
+
                 cfg->srcpos.x = subitem->child->valuedouble;
                 cfg->srcpos.y = subitem->child->next->valuedouble;
                 cfg->srcpos.z = subitem->child->next->next->valuedouble;
+
+                if (subitem->child->next->next->next) {
+                    cfg->srcpos.w = subitem->child->next->next->next->valuedouble;
+                }
+
+                if (cfg->extrasrclen > 0) {
+                    int count = 0;
+
+                    if (cfg->srcdata == NULL) {
+                        cfg->srcdata = (ExtraSrc*)calloc(sizeof(ExtraSrc), cfg->extrasrclen);
+                    }
+
+                    while (subitem->next && count < cfg->extrasrclen) {
+                        subitem = subitem->next;
+                        cfg->srcdata[count].srcpos.x = subitem->child->valuedouble;
+                        cfg->srcdata[count].srcpos.y = subitem->child->next->valuedouble;
+                        cfg->srcdata[count].srcpos.z = subitem->child->next->next->valuedouble;
+
+                        if (subitem->child->next->next->next) {
+                            cfg->srcdata[count].srcpos.w = subitem->child->next->next->next->valuedouble;
+                        }
+
+                        count++;
+                    }
+                }
             }
 
             subitem = FIND_JSON_OBJ("Dir", "Optode.Source.Dir", src);
 
-            if (subitem) {
+            if (subitem && cJSON_IsArray(subitem)) {
+                if (cJSON_IsArray(subitem->child)) {
+                    if (cfg->srcdata && cfg->extrasrclen != cJSON_GetArraySize(subitem) - 1) {
+                        MMC_ERROR(-1, "Length of sub-elements of Pos/Dir/Param1/Param2 must match");
+                    }
+
+                    if (cfg->srcdata == NULL) {
+                        cfg->extrasrclen = cJSON_GetArraySize(subitem) - 1;
+                    }
+
+                    subitem = subitem->child;
+                }
+
                 cfg->srcdir.x = subitem->child->valuedouble;
                 cfg->srcdir.y = subitem->child->next->valuedouble;
                 cfg->srcdir.z = subitem->child->next->next->valuedouble;
@@ -1783,6 +1890,37 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
                         cfg->srcdir.w = subitem->child->next->next->next->valuedouble;
                     }
                 }
+
+                if (cfg->extrasrclen > 0) {
+                    int count = 0;
+
+                    if (cfg->srcdata == NULL) {
+                        cfg->srcdata = (ExtraSrc*)calloc(sizeof(ExtraSrc), cfg->extrasrclen);
+                    }
+
+                    while (subitem->next && count < cfg->extrasrclen) {
+                        subitem = subitem->next;
+                        cfg->srcdata[count].srcdir.x = subitem->child->valuedouble;
+                        cfg->srcdata[count].srcdir.y = subitem->child->next->valuedouble;
+                        cfg->srcdata[count].srcdir.z = subitem->child->next->next->valuedouble;
+
+                        if (subitem->child->next->next->next) {
+                            if (cJSON_IsString(subitem->child->next->next->next)) {
+                                if (strcmp(subitem->child->next->next->next->valuestring, "_NaN_") == 0) {
+                                    cfg->srcdata[count].srcdir.w = NAN;
+                                } else if (strcmp(subitem->child->next->next->next->valuestring, "_Inf_") == 0) {
+                                    cfg->srcdata[count].srcdir.w = INFINITY;
+                                } else if (strcmp(subitem->child->next->next->next->valuestring, "-_Inf_") == 0) {
+                                    cfg->srcdata[count].srcdir.w = -INFINITY;
+                                }
+                            } else {
+                                cfg->srcdata[count].srcdir.w = subitem->child->next->next->next->valuedouble;
+                            }
+                        }
+
+                        count++;
+                    }
+                }
             }
 
             subitem = FIND_JSON_OBJ("Type", "Optode.Source.Type", src);
@@ -1797,7 +1935,19 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
 
             subitem = FIND_JSON_OBJ("Param1", "Optode.Source.Param1", src);
 
-            if (subitem && cJSON_GetArraySize(subitem) == 4) {
+            if (subitem && cJSON_IsArray(subitem)) {
+                if (cJSON_IsArray(subitem->child)) {
+                    if (cfg->srcdata && cfg->extrasrclen != cJSON_GetArraySize(subitem) - 1) {
+                        MMC_ERROR(-1, "Length of sub-elements of Pos/Dir/Param1/Param2 must match");
+                    }
+
+                    if (cfg->srcdata == NULL) {
+                        cfg->extrasrclen = cJSON_GetArraySize(subitem) - 1;
+                    }
+
+                    subitem = subitem->child;
+                }
+
                 cfg->srcparam1.x = subitem->child->valuedouble;
 
                 if (subitem->child->next) {
@@ -1811,11 +1961,50 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
                         }
                     }
                 }
+
+                if (cfg->extrasrclen > 0) {
+                    int count = 0;
+
+                    if (cfg->srcdata == NULL) {
+                        cfg->srcdata = (ExtraSrc*)calloc(sizeof(ExtraSrc), cfg->extrasrclen);
+                    }
+
+                    while (subitem->next && count < cfg->extrasrclen) {
+                        subitem = subitem->next;
+                        cfg->srcdata[count].srcparam1.x = subitem->child->valuedouble;
+
+                        if (subitem->child->next) {
+                            cfg->srcdata[count].srcparam1.y = subitem->child->next->valuedouble;
+
+                            if (subitem->child->next->next) {
+                                cfg->srcdata[count].srcparam1.z = subitem->child->next->next->valuedouble;
+
+                                if (subitem->child->next->next->next) {
+                                    cfg->srcdata[count].srcparam1.w = subitem->child->next->next->next->valuedouble;
+                                }
+                            }
+                        }
+
+                        count++;
+                    }
+                }
             }
 
             subitem = FIND_JSON_OBJ("Param2", "Optode.Source.Param2", src);
 
-            if (subitem && cJSON_GetArraySize(subitem) == 4) {
+            if (subitem && cJSON_IsArray(subitem)) {
+                if (cJSON_IsArray(subitem->child)) {
+                    if (cfg->srcdata && cfg->extrasrclen != cJSON_GetArraySize(subitem) - 1) {
+                        MMC_ERROR(-1, "Length of sub-elements of Pos/Dir/Param1/Param2 must match");
+                    }
+
+                    if (cfg->srcdata == NULL) {
+                        cfg->extrasrclen = cJSON_GetArraySize(subitem) - 1;
+                    }
+
+                    subitem = subitem->child;
+                }
+
                 cfg->srcparam2.x = subitem->child->valuedouble;
 
                 if (subitem->child->next) {
@@ -1827,6 +2016,33 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
                         if (subitem->child->next->next->next) {
                             cfg->srcparam2.w = subitem->child->next->next->next->valuedouble;
                         }
+                    }
+                }
+
+                if (cfg->extrasrclen > 0) {
+                    int count = 0;
+
+                    if (cfg->srcdata == NULL) {
+                        cfg->srcdata = (ExtraSrc*)calloc(sizeof(ExtraSrc), cfg->extrasrclen);
+                    }
+
+                    while (subitem->next && count < cfg->extrasrclen) {
+                        subitem = subitem->next;
+                        cfg->srcdata[count].srcparam2.x = subitem->child->valuedouble;
+
+                        if (subitem->child->next) {
+                            cfg->srcdata[count].srcparam2.y = subitem->child->next->valuedouble;
+
+                            if (subitem->child->next->next) {
+                                cfg->srcdata[count].srcparam2.z = subitem->child->next->next->valuedouble;
+
+                                if (subitem->child->next->next->next) {
+                                    cfg->srcdata[count].srcparam2.w = subitem->child->next->next->next->valuedouble;
+                                }
+                            }
+                        }
+
+                        count++;
                     }
                 }
             }
@@ -3438,6 +3654,13 @@ void mmc_validate_config(mcconfig* cfg, float* detps, int dimdetps[2], int seedb
         MMC_ERROR(-4, "srcid exceeds total defined source count");
     }
 
+    /* Mesh-mode adjoint Jacobian needs nodal fluence (basisorder=1) so that
+     * phi(node) is well-defined and ∇φ is non-zero inside each tet. */
+    if (MCX_IS_ADJOINT_TYPE(cfg->outputtype) && cfg->method != rtBLBadouelGrid && cfg->basisorder != 1) {
+        MMC_ERROR(-4, "mesh-mode adjoint Jacobian requires basisorder=1 (nodal fluence); "
+                  "use cfg.method='grid' or set cfg.basisorder=1");
+    }
+
     cfg->his.unitinmm = cfg->unitinmm;
 
     if (cfg->steps.x != cfg->steps.y || cfg->steps.y != cfg->steps.z) {
@@ -3471,6 +3694,10 @@ void mmc_validate_config(mcconfig* cfg, float* detps, int dimdetps[2], int seedb
  */
 
 void mcx_prep(mcconfig* cfg) {
+    if (cfg->extrasrclen > 0 && cfg->srcid > cfg->extrasrclen) {
+        MMC_ERROR(-4, "srcid exceeds total defined source count");
+    }
+
     if (cfg->issavedet && cfg->detnum == 0 && cfg->isextdet == 0) {
         cfg->issavedet = 0;
     }
@@ -4015,8 +4242,9 @@ void mcx_parsecmd(int argc, char* argv[], mcconfig* cfg) {
         MMC_ERROR(-1, "Adjoint Jacobian output is not valid in replay mode.");
     }
 
-    if (MCX_IS_ADJOINT_TYPE(cfg->outputtype) && cfg->method != rtBLBadouelGrid) {
-        MMC_ERROR(-1, "Adjoint Jacobian output currently requires grid output (method G). Please use -M G.");
+    if (MCX_IS_ADJOINT_TYPE(cfg->outputtype) && cfg->method != rtBLBadouelGrid && cfg->basisorder != 1) {
+        MMC_ERROR(-1, "Mesh-mode adjoint Jacobian requires basisorder=1 (nodal fluence); "
+                  "use -M G for grid output or set --basisorder 1.");
     }
 
     if (cfg->isgpuinfo != 2) { /*print gpu info only*/

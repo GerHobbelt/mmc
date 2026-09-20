@@ -36,6 +36,15 @@
 #define __global
 #define __kernel __global__
 
+/* CUDA: per-node mua/musp dispatch via template parameters so the host can
+ * select between gmed[] (constant memory) and the per-node global-memory
+ * arrays at runtime without rebuilding the kernel. The template-param names
+ * NODAL_USE_MUA / NODAL_USE_MUSP match the OpenCL #defines (set in the #else
+ * branch from MCX_NODAL_MUA / MCX_NODAL_MUSP) so the kernel body can be
+ * written once. */
+#define MMC_TEMPLATE template <const int NODAL_USE_MUA, const int NODAL_USE_MUSP>
+#define MMC_TARGS    <NODAL_USE_MUA, NODAL_USE_MUSP>
+
 inline __device__ float3 cross(float3 a, float3 b) {
     return make_float3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x);
 }
@@ -206,6 +215,31 @@ typedef struct MMC_FLOAT3 {
 #ifndef NULL
     #define NULL 0
 #endif
+
+/* OpenCL: per-node mua/musp dispatch via JIT macros (-DMCX_NODAL_MUA /
+ * -DMCX_NODAL_MUSP appended in mmc_cl_host.c). The kernel always declares
+ * gnodemua/gnodemusp args but only dereferences them when the macro is set,
+ * so non-recon callers can bind NULL.
+ *
+ * CUDA: dispatch lives in template parameters (see the #ifdef __NVCC__
+ * block at the head of this file); the names NODAL_USE_MUA / NODAL_USE_MUSP
+ * are reused inside templated functions so the same body compiles for both
+ * backends. */
+#ifdef MCX_NODAL_MUA
+    #define NODAL_USE_MUA   1
+#else
+    #define NODAL_USE_MUA   0
+#endif
+#ifdef MCX_NODAL_MUSP
+    #define NODAL_USE_MUSP  1
+#else
+    #define NODAL_USE_MUSP  0
+#endif
+
+/* OpenCL has no function templates; the dispatch lives entirely in the
+ * #defines above, so the template prefix and call-site arglist are empty. */
+#define MMC_TEMPLATE
+#define MMC_TARGS
 
 
 #ifdef MCX_USE_NATIVE
@@ -556,6 +590,15 @@ __device__ void savedetphoton(__global float* n_det, __global uint* detectedphot
 
 #endif
             baseaddr *= (GPU_PARAM(gcfg, reclen) + 1);
+
+            /* Pack the launch slot index (1-based, matching mcx convention) into the
+             * upper 16 bits of the detid column when running in multi-source mode.
+             * Lower 16 bits keep the detector id; the upper bits stay zero for
+             * single-source runs (extrasrclen==0) so existing readers are unaffected. */
+            if (GPU_PARAM(gcfg, extrasrclen) > 0 && GPU_PARAM(gcfg, srcid) <= 0) {
+                detid |= ((unsigned int)(r->posidx + 1u) << 16);
+            }
+
             n_det[baseaddr++] = detid;
 
             for (i = 0; i < (GPU_PARAM(gcfg, maxmedia) << 1); i++) {
@@ -617,8 +660,11 @@ __device__ void savedebugdata(ray* r, uint id, __global MCXReporter* reporter, _
  * \param[out] visit: statistics counters of this thread
  */
 
+MMC_TEMPLATE
 __device__ float branchless_badouel_raytet(ray* r, __constant MCXParam* gcfg, __local float* ppath, __global int* elem, __global float* weight,
-        int type, __global int* facenb, __global float4* normal, __constant Medium* gmed, __global float* replayweight, __global float* replaytime) {
+        int type, __global int* facenb, __global float4* normal, __constant Medium* gmed,
+        __global float* gnodemua, __global float* gnodemusp,
+        __global float* replayweight, __global float* replaytime) {
 
     float Lmin;
     float ww, totalloss = 0.f;
@@ -670,6 +716,24 @@ __device__ float branchless_badouel_raytet(ray* r, __constant MCXParam* gcfg, __
         Medium prop;
 
         prop = gmed[type];
+
+        /* Per-node mua/musp override (set by redbird-style DOT reconstruction).
+         * Uses the element-centroid average of the four nodal values, which is
+         * what the linear-FEM mass-matrix integration of a per-node-linear
+         * property reduces to. NODAL_USE_MUA/NODAL_USE_MUSP are compile-time
+         * constants (template params in CUDA, #define from MCX_NODAL_MUA/MUSP
+         * in OpenCL) so the unused branch is dead-code-eliminated. */
+        if (NODAL_USE_MUA) {
+            __global int* eelocal = elem + (r->eid - 1) * GPU_PARAM(gcfg, elemlen);
+            prop.mua = 0.25f * (gnodemua[eelocal[0] - 1] + gnodemua[eelocal[1] - 1]
+                                + gnodemua[eelocal[2] - 1] + gnodemua[eelocal[3] - 1]);
+
+            if (NODAL_USE_MUSP) {
+                prop.mus = 0.25f * (gnodemusp[eelocal[0] - 1] + gnodemusp[eelocal[1] - 1]
+                                    + gnodemusp[eelocal[2] - 1] + gnodemusp[eelocal[3] - 1]);
+            }
+        }
+
         currweight.f = r->weight;
 
         r->Lmove = (prop.mus <= EPS) ? R_MIN_MUS : r->slen / prop.mus;
@@ -1235,13 +1299,30 @@ __device__ void launchnewphoton(__constant MCXParam* gcfg, ray* r, __global FLOA
     int canfocus = 1;
     float3 origin = r->p0;
 
-    /* Multi-source / adjoint mode: randomly select a source from gmed[] (packed after media) */
-    if (GPU_PARAM(gcfg, srcid) < 0 && GPU_PARAM(gcfg, extrasrclen) > 0) {
-        /* uniformly select a source slot */
-        unsigned int slot = (unsigned int)(rand_uniform01(ran) * GPU_PARAM(gcfg, extrasrclen));
+    /* Multi-source / single-slot mode: pick a source slot from srcdata[] (packed in gmed[] after media).
+     *   srcid <  0  : pick a slot uniformly at random (every photon may go to a different slot;
+     *                 r->posidx routes its deposits to the per-slot field buffer offset).
+     *   srcid >  0  : launch only from srcdata[srcid-1] (1-based selector; matches mcx parity).
+     *                 Field buffer collapses to one slot, so r->posidx is forced to 0.
+     */
+    if (GPU_PARAM(gcfg, extrasrclen) > 0
+            && (GPU_PARAM(gcfg, srcid) < 0
+                || (GPU_PARAM(gcfg, srcid) > 0 && GPU_PARAM(gcfg, srcid) <= GPU_PARAM(gcfg, extrasrclen)))) {
+        unsigned int slot;            /* slot index into srcdata[] (source geometry) */
+        unsigned int outslot;         /* slot index into field buffer (output) */
 
-        if (slot >= (unsigned int)GPU_PARAM(gcfg, extrasrclen)) {
-            slot = (unsigned int)GPU_PARAM(gcfg, extrasrclen) - 1u;
+        if (GPU_PARAM(gcfg, srcid) < 0) {
+            /* uniformly select a source slot */
+            slot = (unsigned int)(rand_uniform01(ran) * GPU_PARAM(gcfg, extrasrclen));
+
+            if (slot >= (unsigned int)GPU_PARAM(gcfg, extrasrclen)) {
+                slot = (unsigned int)GPU_PARAM(gcfg, extrasrclen) - 1u;
+            }
+
+            outslot = slot;
+        } else {
+            slot = (unsigned int)(GPU_PARAM(gcfg, srcid) - 1);    /* 1-based to 0-based */
+            outslot = 0u;                                          /* collapse to one output slot */
         }
 
         /* Extra sources are packed into gmed[] starting at srcpropoffset;
@@ -1256,7 +1337,7 @@ __device__ void launchnewphoton(__constant MCXParam* gcfg, ray* r, __global FLOA
         float src_dir_y = srcs[slot].srcdir.y;
         float src_dir_z = srcs[slot].srcdir.z;
 
-        r->posidx = slot;  /* record source slot for field-buffer indexing */
+        r->posidx = outslot;  /* record source slot for field-buffer indexing */
         r->p0.x = src_pos_x;
         r->p0.y = src_pos_y;
         r->p0.z = src_pos_z;
@@ -1635,8 +1716,10 @@ __device__ void launchnewphoton(__constant MCXParam* gcfg, ray* r, __global FLOA
  * \param[out] visit: statistics counters of this thread
  */
 
+MMC_TEMPLATE
 __device__ void onephoton(unsigned int id, __local float* ppath, __constant MCXParam* gcfg, __global FLOAT3* node, __global int* elem, __global float* weight, __global float* dref,
                           __global int* type, __global int* facenb,  __global int* srcelem, __global float4* normal, __constant Medium* gmed,
+                          __global float* gnodemua, __global float* gnodemusp,
                           __global float* n_det, __global uint* detectedphoton, __local float* energytot, __local float* energyesc, __private RandType* ran, int* raytet, __global float* srcpattern,
                           __global float* replayweight, __global float* replaytime, __global RandType* photonseed, __global MCXReporter* reporter, __global float* gdebugdata) {
 
@@ -1706,7 +1789,7 @@ __device__ void onephoton(unsigned int id, __local float* ppath, __constant MCXP
     /*http://stackoverflow.com/questions/2148149/how-to-sum-a-large-number-of-float-number*/
 
     while (1) { /*propagate a photon until exit*/
-        r.slen = branchless_badouel_raytet(&r, gcfg, ppath, elem, weight, type[r.eid - 1], facenb, normal, gmed, replayweight, replaytime);
+        r.slen = branchless_badouel_raytet MMC_TARGS (&r, gcfg, ppath, elem, weight, type[r.eid - 1], facenb, normal, gmed, gnodemua, gnodemusp, replayweight, replaytime);
         (*raytet)++;
 
         if (r.pout.x == MMC_UNDEFINED) {
@@ -1779,7 +1862,7 @@ __device__ void onephoton(unsigned int id, __local float* ppath, __constant MCXP
                 GPUDEBUG(("P %f %f %f %d %u %e\n", r.pout.x, r.pout.y, r.pout.z, r.eid, id, r.slen));
             }
 
-            r.slen = branchless_badouel_raytet(&r, gcfg, ppath, elem, weight, type[r.eid - 1], facenb, normal, gmed, replayweight, replaytime);
+            r.slen = branchless_badouel_raytet MMC_TARGS (&r, gcfg, ppath, elem, weight, type[r.eid - 1], facenb, normal, gmed, gnodemua, gnodemusp, replayweight, replaytime);
             (*raytet)++;
 #if defined(MCX_SAVE_DETECTORS) || defined(__NVCC__)
 
@@ -1797,7 +1880,7 @@ __device__ void onephoton(unsigned int id, __local float* ppath, __constant MCXP
 
             while (r.pout.x == MMC_UNDEFINED && fixcount++ < MAX_TRIAL) {
                 fixphoton(&r.p0, node, (__global int*)(elem + (r.eid - 1)*GPU_PARAM(gcfg, elemlen)));
-                r.slen = branchless_badouel_raytet(&r, gcfg, ppath, elem, weight, type[r.eid - 1], facenb, normal, gmed, replayweight, replaytime);
+                r.slen = branchless_badouel_raytet MMC_TARGS (&r, gcfg, ppath, elem, weight, type[r.eid - 1], facenb, normal, gmed, gnodemua, gnodemusp, replayweight, replaytime);
                 (*raytet)++;
 #if defined(MCX_SAVE_DETECTORS) || defined(__NVCC__)
 
@@ -1935,11 +2018,13 @@ __device__ void onephoton(unsigned int id, __local float* ppath, __constant MCXP
     }
 }
 
+MMC_TEMPLATE
 __kernel void mmc_main_loop(const int nphoton, const int ophoton,
 #ifndef __NVCC__
     __constant__ MCXParam* gcfg, __local float* sharedmem, __constant__ Medium* gmed,
 #endif
                             __global FLOAT3* node, __global int* elem,  __global float* weight, __global float* dref, __global int* type, __global int* facenb,  __global int* srcelem, __global float4* normal,
+                            __global float* gnodemua, __global float* gnodemusp,
                             __global float* n_det, __global uint* detectedphoton,
                             __global uint* n_seed, __global int* progress, __global float* energy, __global MCXReporter* reporter, __global float* srcpattern,
                             __global float* replayweight, __global float* replaytime, __global RandType* replayseed, __global RandType* photonseed, __global float* gdebugdata) {
@@ -1966,11 +2051,13 @@ __kernel void mmc_main_loop(const int nphoton, const int ophoton,
                 t[j] = replayseed[(idx * nphoton + MIN(idx, ophoton) + i) * RAND_BUF_LEN + j];
             }
 
-        onephoton(idx * nphoton + MIN(idx, ophoton) + i, sharedmem + get_local_size(0) * (GPU_PARAM(gcfg, srcnum) << 1) +
-                  get_local_id(0) * (GPU_PARAM(gcfg, reclen) + (GPU_PARAM(gcfg, srcnum) > 1) * GPU_PARAM(gcfg, srcnum)), gcfg, node, elem,
-                  weight, dref, type, facenb, srcelem, normal, gmed, n_det, detectedphoton, sharedmem + get_local_id(0) * GPU_PARAM(gcfg, srcnum),
-                  sharedmem + (get_local_size(0) + get_local_id(0)) * GPU_PARAM(gcfg, srcnum), t, &raytet,
-                  srcpattern, replayweight, replaytime, photonseed, reporter, gdebugdata);
+        onephoton MMC_TARGS (idx * nphoton + MIN(idx, ophoton) + i, sharedmem + get_local_size(0) * (GPU_PARAM(gcfg, srcnum) << 1) +
+                             get_local_id(0) * (GPU_PARAM(gcfg, reclen) + (GPU_PARAM(gcfg, srcnum) > 1) * GPU_PARAM(gcfg, srcnum)), gcfg, node, elem,
+                             weight, dref, type, facenb, srcelem, normal, gmed,
+                             gnodemua, gnodemusp,
+                             n_det, detectedphoton, sharedmem + get_local_id(0) * GPU_PARAM(gcfg, srcnum),
+                             sharedmem + (get_local_size(0) + get_local_id(0)) * GPU_PARAM(gcfg, srcnum), t, &raytet,
+                             srcpattern, replayweight, replaytime, photonseed, reporter, gdebugdata);
     }
 
     for (int i = 0; i < GPU_PARAM(gcfg, srcnum); i++) {
@@ -2166,6 +2253,254 @@ __kernel void mmc_adjoint_dcoeff_kernel(__global float* gfield_re, __global floa
                 gadjoint[out_idx + (unsigned int)(adjointlen)] =
                     gsx_re * gdx_im + gsy_re * gdy_im + gsz_re * gdz_im
                     + gsx_im * gdx_re + gsy_im * gdy_re + gsz_im * gdz_re;
+            }
+        }
+    }
+}
+
+/**
+ * @brief Mesh-mode adjoint Jacobian (full FEM form), one thread per element.
+ *
+ * Implements the rb_femjacobian formula on a tet mesh given nodal fluences
+ * phi_s, phi_d. Per element t with 4 nodes ee[0..3] and volume Ve:
+ *
+ *   J_mua(t) = -0.1*Ve * [ Σ_i φ_s(ee[i])·φ_d(ee[i])
+ *                          + 0.5 * Σ_{i<j} (φ_s(ee[i])·φ_d(ee[j]) + φ_s(ee[j])·φ_d(ee[i])) ]
+ *
+ *   J_D(t)   = -[ Σ_i deldotdel[t][diag_i] · φ_s(ee[i])·φ_d(ee[i])
+ *                + Σ_{i<j} deldotdel[t][off_ij] · (φ_s(ee[i])·φ_d(ee[j]) + φ_s(ee[j])·φ_d(ee[i])) ]
+ *
+ * Nodal-fluence layout (matches mmc_adjoint_kernel's grid convention):
+ *   field[node + (gate + slot*maxgate)*nn]
+ *
+ * Output:
+ *   if isnodal == 0: g_jmua_e/g_jd_e[t + (s*Nd+d)*ne]
+ *   if isnodal != 0: g_jmua_n/g_jd_n[n + (s*Nd+d)*nn] (atomic scatter, *0.25)
+ *
+ * RF: gfield_im non-NULL; real/imag Jacobian written to first/second adjointlen blocks.
+ *
+ * @param[in]  gfield_re   nodal real fluence [nn * maxgate * nsrcslots]
+ * @param[in]  gfield_im   nodal imag fluence (RF only) or NULL
+ * @param[in]  gelem       per-element node indices (1-based), shape [ne * elemlen]
+ * @param[in]  gevol       per-element volume (float, length ne)
+ * @param[in]  gdeldotdel  per-element ⟨∇φ_i·∇φ_j⟩*Ve, packed upper-triangle [ne*10]
+ * @param[out] gjmua       J_mua output (NULL to skip)
+ * @param[out] gjd         J_D   output (NULL to skip)
+ * @param[in]  ne, nn      mesh sizes
+ * @param[in]  maxgate     number of time gates
+ * @param[in]  Ns, Nd      number of source and detector slots
+ * @param[in]  elemlen     usually 4 for tets
+ * @param[in]  isnodal     0=element-based output; nonzero=nodal output (atomic scatter)
+ */
+#ifdef __NVCC__
+__global__ void mmc_adjoint_mesh_full_kernel(float* gfield_re, float* gfield_im,
+        int* gelem, float* gevol, float* gdeldotdel,
+        float* gjmua, float* gjd,
+        unsigned int ne, unsigned int nn, unsigned int maxgate,
+        unsigned int Ns, unsigned int Nd, unsigned int elemlen,
+        int isnodal) {
+    unsigned int t = blockIdx.x * blockDim.x + threadIdx.x;
+#else
+__kernel void mmc_adjoint_mesh_full_kernel(__global float* gfield_re, __global float* gfield_im,
+        __global int* gelem, __global float* gevol, __global float* gdeldotdel,
+        __global float* gjmua, __global float* gjd,
+        unsigned int ne, unsigned int nn, unsigned int maxgate,
+        unsigned int Ns, unsigned int Nd, unsigned int elemlen,
+        int isnodal) {
+    unsigned int t = get_global_id(0);
+#endif
+
+    if (t >= ne) {
+        return;
+    }
+
+    /* upper-triangle pair indices into the packed 10-entry deldotdel row:
+     * order is [00,01,02,03,11,12,13,22,23,33] */
+    const int diag_idx[4] = {0, 4, 7, 9};
+    const int off_idx[6]  = {1, 2, 3, 5, 6, 8};
+    const int pair_a[6]   = {0, 0, 0, 1, 1, 2};
+    const int pair_b[6]   = {1, 2, 3, 2, 3, 3};
+
+    int ee[4];
+
+    for (int k = 0; k < 4; k++) {
+        ee[k] = gelem[t * elemlen + k] - 1;  /* 1-based -> 0-based */
+    }
+
+    float Ve = gevol[t];
+
+    size_t adjointlen_e = (size_t)ne * Ns * Nd;
+    size_t adjointlen_n = (size_t)nn * Ns * Nd;
+    int isrf = (gfield_im != 0) ? 1 : 0;
+
+    for (unsigned int s = 0; s < Ns; s++) {
+        float phisr[4], phisi[4];
+
+        for (int k = 0; k < 4; k++) {
+            phisr[k] = mmc_cw_sum(gfield_re, ee[k], s, maxgate, nn);
+            phisi[k] = isrf ? mmc_cw_sum(gfield_im, ee[k], s, maxgate, nn) : 0.f;
+        }
+
+        for (unsigned int d = 0; d < Nd; d++) {
+            unsigned int slot = Ns + d;
+            float phidr[4], phidi[4];
+
+            for (int k = 0; k < 4; k++) {
+                phidr[k] = mmc_cw_sum(gfield_re, ee[k], slot, maxgate, nn);
+                phidi[k] = isrf ? mmc_cw_sum(gfield_im, ee[k], slot, maxgate, nn) : 0.f;
+            }
+
+            /* assemble Re/Im of (phi_s * phi_d) products at each node-pair (float arithmetic
+             * is fine here — MC noise dominates well above single-precision roundoff) */
+            float jmua_re = 0.f, jmua_im = 0.f;
+            float jd_re   = 0.f, jd_im   = 0.f;
+
+            /* diagonal terms: i == j */
+            for (int i = 0; i < 4; i++) {
+                float pre = phisr[i] * phidr[i] - phisi[i] * phidi[i];
+                float pim = isrf ? (phisr[i] * phidi[i] + phisi[i] * phidr[i]) : 0.f;
+                jmua_re += pre;
+                jmua_im += pim;
+
+                if (gjd) {
+                    float w = gdeldotdel[(size_t)t * 10 + diag_idx[i]];
+                    jd_re += w * pre;
+                    jd_im += w * pim;
+                }
+            }
+
+            /* off-diagonal pairs (i<j): use both orderings phi_s[i]*phi_d[j] + phi_s[j]*phi_d[i] */
+            for (int p = 0; p < 6; p++) {
+                int a = pair_a[p], b = pair_b[p];
+                float pre = phisr[a] * phidr[b] + phisr[b] * phidr[a]
+                            - phisi[a] * phidi[b] - phisi[b] * phidi[a];
+                float pim = isrf ? (phisr[a] * phidi[b] + phisr[b] * phidi[a]
+                                    + phisi[a] * phidr[b] + phisi[b] * phidr[a]) : 0.f;
+                jmua_re += 0.5f * pre;
+                jmua_im += 0.5f * pim;
+
+                if (gjd) {
+                    float w = gdeldotdel[(size_t)t * 10 + off_idx[p]];
+                    jd_re += w * pre;
+                    jd_im += w * pim;
+                }
+            }
+
+            jmua_re *= -0.1f * Ve;
+            jmua_im *= -0.1f * Ve;
+            jd_re   *= -1.f;
+            jd_im   *= -1.f;
+
+            unsigned int sdpair = s * Nd + d;
+
+            if (!isnodal) {
+                /* element-based output: one write per (sd, t) */
+                if (gjmua) {
+                    size_t k = (size_t)t + (size_t)sdpair * ne;
+                    gjmua[k] = jmua_re;
+
+                    if (isrf) {
+                        gjmua[k + adjointlen_e] = jmua_im;
+                    }
+                }
+
+                if (gjd) {
+                    size_t k = (size_t)t + (size_t)sdpair * ne;
+                    gjd[k] = jd_re;
+
+                    if (isrf) {
+                        gjd[k + adjointlen_e] = jd_im;
+                    }
+                }
+            } else {
+                /* nodal output: scatter 0.25 * elem-value to each of 4 nodes (atomic) */
+                float c = 0.25f;
+                float jmua_re_f = jmua_re * c;
+                float jmua_im_f = jmua_im * c;
+                float jd_re_f   = jd_re   * c;
+                float jd_im_f   = jd_im   * c;
+
+                for (int k = 0; k < 4; k++) {
+                    size_t base = (size_t)ee[k] + (size_t)sdpair * nn;
+
+                    if (gjmua) {
+                        atomicadd(gjmua + base, jmua_re_f);
+
+                        if (isrf) {
+                            atomicadd(gjmua + base + adjointlen_n, jmua_im_f);
+                        }
+                    }
+
+                    if (gjd) {
+                        atomicadd(gjd + base, jd_re_f);
+
+                        if (isrf) {
+                            atomicadd(gjd + base + adjointlen_n, jd_im_f);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * @brief Mesh-mode adjoint Jacobian (nodal approximation), one thread per node.
+ *
+ * Implements the nodal-adjoint approximation from PhD thesis eq.
+ * (3d3d:adjoint:nodal) / rbjacmuafast.m:
+ *
+ *   J_mua_n(n) = -nvol[n] * φ_s(n) * φ_d(n)
+ *
+ * Valid when the forward mesh is fine relative to the parameter mesh.
+ * J_D is NOT defined in this approximation; use the full FEM kernel for J_D.
+ *
+ * @param[in]  gfield_re   nodal real fluence [nn * maxgate * nsrcslots]
+ * @param[in]  gfield_im   nodal imag fluence (RF only) or NULL
+ * @param[in]  gnvol       per-node Voronoi volume (float, length nn)
+ * @param[out] gjmua       J_mua_n output, [nn * Ns * Nd] (CW) plus another such block for imag
+ * @param[in]  nn          number of nodes
+ * @param[in]  maxgate     number of time gates
+ * @param[in]  Ns, Nd      number of source and detector slots
+ */
+#ifdef __NVCC__
+__global__ void mmc_adjoint_mesh_nodal_kernel(float* gfield_re, float* gfield_im,
+        float* gnvol, float* gjmua,
+        unsigned int nn, unsigned int maxgate,
+        unsigned int Ns, unsigned int Nd) {
+    unsigned int n = blockIdx.x * blockDim.x + threadIdx.x;
+#else
+__kernel void mmc_adjoint_mesh_nodal_kernel(__global float* gfield_re, __global float* gfield_im,
+        __global float* gnvol, __global float* gjmua,
+        unsigned int nn, unsigned int maxgate,
+        unsigned int Ns, unsigned int Nd) {
+    unsigned int n = get_global_id(0);
+#endif
+
+    if (n >= nn) {
+        return;
+    }
+
+    size_t adjointlen = (size_t)nn * Ns * Nd;
+    float vol = gnvol[n];
+    int isrf = (gfield_im != 0) ? 1 : 0;
+
+    for (unsigned int s = 0; s < Ns; s++) {
+        float cw_src_re = mmc_cw_sum(gfield_re, n, s, maxgate, nn);
+        float cw_src_im = isrf ? mmc_cw_sum(gfield_im, n, s, maxgate, nn) : 0.f;
+
+        for (unsigned int d = 0; d < Nd; d++) {
+            unsigned int slot = Ns + d;
+            float cw_det_re = mmc_cw_sum(gfield_re, n, slot, maxgate, nn);
+
+            size_t out_idx = (size_t)n + (size_t)(s * Nd + d) * nn;
+
+            if (isrf) {
+                float cw_det_im = mmc_cw_sum(gfield_im, n, slot, maxgate, nn);
+                gjmua[out_idx]              = -vol * (cw_src_re * cw_det_re - cw_src_im * cw_det_im);
+                gjmua[out_idx + adjointlen] = -vol * (cw_src_re * cw_det_im + cw_src_im * cw_det_re);
+            } else {
+                gjmua[out_idx] = -vol * cw_src_re * cw_det_re;
             }
         }
     }
