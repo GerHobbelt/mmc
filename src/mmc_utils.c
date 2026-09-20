@@ -160,7 +160,7 @@ const char raytracing[] = {'p', 'h', 'b', 's', 'g', '\0'};
  * p: scattering counts for computing Jacobians for mus
  */
 
-const char outputtype[] = {'x', 'f', 'e', 'j', 'l', 'p', '\0'};
+const char outputtype[] = {'x', 'f', 'e', 'j', 'l', 'p', 'r', 's', 'a', 'd', 'u', 'v', 'w', 'q', '\0'};
 
 /**
  * Output file format
@@ -198,7 +198,7 @@ const char* zipformat[] = {"zlib", "gzip", "base64", "lzip", "lzma", "lz4", "lz4
  * Flag to decide which platform to run mmc
  */
 
-const char* computebackend[] = {"sse", "opencl", "cuda", ""};
+const char* computebackend[] = {"sse", "opencl", "cuda", "optix", ""};
 
 /**
  * @brief Initializing the simulation configuration with default values
@@ -240,7 +240,7 @@ void mcx_initcfg(mcconfig* cfg) {
     cfg->shapedata = NULL;
     cfg->extrajson = NULL;
 
-#if defined(USE_OPENCL) || defined(USE_CUDA)
+#if defined(USE_OPENCL) || defined(USE_CUDA) || defined(USE_OPTIX)
     cfg->method = rtBLBadouelGrid;
 #else
 #ifndef MMC_USE_SSE
@@ -269,6 +269,12 @@ void mcx_initcfg(mcconfig* cfg) {
     cfg->issaveref = 0;
     cfg->outputtype = otFlux;
     cfg->outputformat = ofASCII;
+    cfg->omega = 0.f;
+    cfg->extrasrclen = 0;
+    cfg->srcdata = NULL;
+    cfg->detdir = NULL;
+    cfg->exportadjoint = NULL;
+    cfg->exportjacob = NULL;
     cfg->ismomentum = 0;
     cfg->issaveseed = 0;
     cfg->issaveexit = 0;
@@ -401,6 +407,26 @@ void mcx_clearcfg(mcconfig* cfg) {
 
     if (cfg->exportdebugdata) {
         free(cfg->exportdebugdata);
+    }
+
+    if (cfg->exportadjoint) {
+        free(cfg->exportadjoint);
+        cfg->exportadjoint = NULL;
+    }
+
+    if (cfg->exportjacob) {
+        free(cfg->exportjacob);
+        cfg->exportjacob = NULL;
+    }
+
+    if (cfg->srcdata) {
+        free(cfg->srcdata);
+        cfg->srcdata = NULL;
+    }
+
+    if (cfg->detdir) {
+        free(cfg->detdir);
+        cfg->detdir = NULL;
     }
 
     if (cfg->flog && cfg->flog != stdout && cfg->flog != stderr) {
@@ -579,7 +605,7 @@ void mcx_savenii(OutputType* dat, size_t len, char* name, int type32bit, int out
  * @param[in] cfg: simulation configuration
  */
 
-void mcx_savebnii(OutputType* vol, int ndim, uint* dims, float* voxelsize, char* name, int isfloat, int iscol, mcconfig* cfg) {
+void mcx_savebnii(void* vol, int ndim, uint* dims, float* voxelsize, char* name, int isfloat, int iscol, int elemsize, mcconfig* cfg) {
     FILE* fp;
     char fname[MAX_FULL_PATH] = {'\0'};
     int affine[] = {0, 0, 1, 0, 0, 0};
@@ -635,8 +661,8 @@ void mcx_savebnii(OutputType* vol, int ndim, uint* dims, float* voxelsize, char*
     UBJ_WRITE_KEY(root, "Param2", uint8, 0);
     UBJ_WRITE_KEY(root, "Param3", uint8, 0);
     UBJ_WRITE_KEY(root, "Intent", uint8, 0);
-    UBJ_WRITE_KEY(root, "DataType", string, (sizeof(OutputType) == 8 ? "double" : (isfloat ? "single" : "uint32")));
-    UBJ_WRITE_KEY(root, "BitDepth", uint8, sizeof(OutputType) * 8);
+    UBJ_WRITE_KEY(root, "DataType", string, (elemsize == 8 ? "double" : (isfloat ? "single" : "uint32")));
+    UBJ_WRITE_KEY(root, "BitDepth", uint8, elemsize * 8);
     UBJ_WRITE_KEY(root, "FirstSliceID", uint8, 0);
     ubjw_write_key(root, "VoxelSize");
     UBJ_WRITE_ARRAY(root, single, ndim, voxelsize);
@@ -700,7 +726,7 @@ void mcx_savebnii(OutputType* vol, int ndim, uint* dims, float* voxelsize, char*
     /* the "NIFTIData" section stores volumetric data */
     ubjw_begin_object(root, UBJ_MIXED, 0);
 
-    if (mcx_jdataencode(vol, ndim, dims, (sizeof(OutputType) == 8 ? "double" : (isfloat ? "single" : "uint32")), sizeof(OutputType), cfg->zipid, root, 1, iscol, cfg)) {
+    if (mcx_jdataencode(vol, ndim, dims, (elemsize == 8 ? "double" : (isfloat ? "single" : "uint32")), elemsize, cfg->zipid, root, 1, iscol, cfg)) {
         MMC_ERROR(-1, "error when converting to JSON");
     }
 
@@ -742,7 +768,7 @@ void mcx_savebnii(OutputType* vol, int ndim, uint* dims, float* voxelsize, char*
  * @param[in] cfg: simulation configuration
  */
 
-void mcx_savejnii(OutputType* vol, int ndim, uint* dims, float* voxelsize, char* name, int isfloat, int iscol, mcconfig* cfg) {
+void mcx_savejnii(void* vol, int ndim, uint* dims, float* voxelsize, char* name, int isfloat, int iscol, int elemsize, mcconfig* cfg) {
     FILE* fp;
     char fname[MAX_FULL_PATH] = {'\0'};
     int affine[] = {0, 0, 1, 0, 0, 0};
@@ -776,8 +802,8 @@ void mcx_savejnii(OutputType* vol, int ndim, uint* dims, float* voxelsize, char*
     cJSON_AddNumberToObject(hdr, "Param2", 0);
     cJSON_AddNumberToObject(hdr, "Param3", 0);
     cJSON_AddNumberToObject(hdr, "Intent", 0);
-    cJSON_AddStringToObject(hdr, "DataType", (sizeof(OutputType) == 8 ? "double" : (isfloat ? "single" : "uint32")));
-    cJSON_AddNumberToObject(hdr, "BitDepth", sizeof(OutputType) * 8);
+    cJSON_AddStringToObject(hdr, "DataType", (elemsize == 8 ? "double" : (isfloat ? "single" : "uint32")));
+    cJSON_AddNumberToObject(hdr, "BitDepth", elemsize * 8);
     cJSON_AddNumberToObject(hdr, "FirstSliceID", 0);
     cJSON_AddItemToObject(hdr, "VoxelSize", cJSON_CreateFloatArray(voxelsize, ndim));
     cJSON_AddItemToObject(hdr, "Orientation", sub = cJSON_CreateObject());
@@ -827,7 +853,7 @@ void mcx_savejnii(OutputType* vol, int ndim, uint* dims, float* voxelsize, char*
     /* the "NIFTIData" section stores volumetric data */
     cJSON_AddItemToObject(root, "NIFTIData",   dat = cJSON_CreateObject());
 
-    if (mcx_jdataencode(vol, ndim, dims, (sizeof(OutputType) == 8 ? "double" : (isfloat ? "single" : "uint32")), sizeof(OutputType), cfg->zipid, dat, 0, iscol, cfg)) {
+    if (mcx_jdataencode(vol, ndim, dims, (elemsize == 8 ? "double" : (isfloat ? "single" : "uint32")), elemsize, cfg->zipid, dat, 0, iscol, cfg)) {
         MMC_ERROR(-1, "error when converting to JSON");
     }
 
@@ -856,6 +882,14 @@ void mcx_savejnii(OutputType* vol, int ndim, uint* dims, float* voxelsize, char*
     if (root) {
         cJSON_Delete(root);
     }
+}
+
+void mcx_savefloatjnii(float* vol, int ndim, uint* dims, float* voxelsize, char* name, mcconfig* cfg) {
+    mcx_savejnii(vol, ndim, dims, voxelsize, name, 1, 1, sizeof(float), cfg);
+}
+
+void mcx_savefloatbnii(float* vol, int ndim, uint* dims, float* voxelsize, char* name, mcconfig* cfg) {
+    mcx_savebnii(vol, ndim, dims, voxelsize, name, 1, 1, sizeof(float), cfg);
 }
 
 /**
@@ -908,9 +942,9 @@ void mcx_savedata(OutputType* dat, size_t len, mcconfig* cfg, int isref) {
         }
 
         if (cfg->outputformat == ofJNifti) {
-            mcx_savejnii(dat, lastdim + (dims[lastdim] > 1), dims, voxelsize, name, 1, (cfg->method == rtBLBadouelGrid), cfg);
+            mcx_savejnii(dat, lastdim + (dims[lastdim] > 1), dims, voxelsize, name, 1, (cfg->method == rtBLBadouelGrid), sizeof(OutputType), cfg);
         } else {
-            mcx_savebnii(dat, lastdim + (dims[lastdim] > 1), dims, voxelsize, name, 1, (cfg->method == rtBLBadouelGrid), cfg);
+            mcx_savebnii(dat, lastdim + (dims[lastdim] > 1), dims, voxelsize, name, 1, (cfg->method == rtBLBadouelGrid), sizeof(OutputType), cfg);
         }
 
         return;
@@ -1707,6 +1741,43 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
                     }
                 }
             }
+
+
+            subitem = FIND_JSON_OBJ("Param1", "Optode.Detector.Param1", src);
+
+            if (subitem && cJSON_GetArraySize(subitem) == 4) {
+                cfg->detparam1.x = subitem->child->valuedouble;
+
+                if (subitem->child->next) {
+                    cfg->detparam1.y = subitem->child->next->valuedouble;
+
+                    if (subitem->child->next->next) {
+                        cfg->detparam1.z = subitem->child->next->next->valuedouble;
+
+                        if (subitem->child->next->next->next) {
+                            cfg->detparam1.w = subitem->child->next->next->next->valuedouble;
+                        }
+                    }
+                }
+            }
+
+            subitem = FIND_JSON_OBJ("Param2", "Optode.Detector.Param2", src);
+
+            if (subitem && cJSON_GetArraySize(subitem) == 4) {
+                cfg->detparam2.x = subitem->child->valuedouble;
+
+                if (subitem->child->next) {
+                    cfg->detparam2.y = subitem->child->next->valuedouble;
+
+                    if (subitem->child->next->next) {
+                        cfg->detparam2.z = subitem->child->next->next->valuedouble;
+
+                        if (subitem->child->next->next->next) {
+                            cfg->detparam2.w = subitem->child->next->next->next->valuedouble;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1820,8 +1891,40 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
         cfg->tend  = FIND_JSON_KEY("T1", "Forward.T1", Forward, 0.0, valuedouble);
         cfg->tstep = FIND_JSON_KEY("Dt", "Forward.Dt", Forward, 0.0, valuedouble);
         cfg->nout = FIND_JSON_KEY("N0", "Forward.N0", Forward, cfg->nout, valuedouble);
+        cfg->omega = FIND_JSON_KEY("Omega", "Forward.Omega", Forward, 0.0, valuedouble);
 
         cfg->maxgate = (int)((cfg->tend - cfg->tstart) / cfg->tstep + 0.5);
+    }
+
+    /* parse DetDir (detector normal directions for adjoint mode) */
+    {
+        cJSON* dets = FIND_JSON_OBJ("Detector", "Optode.Detector", Optode);
+        cJSON* ddir = dets ? FIND_JSON_OBJ("Dir", "Optode.Detector.Dir", dets) : NULL;
+
+        if (ddir && cfg->detnum > 0) {
+            int di;
+            cfg->detdir = (float4*)calloc(cfg->detnum, sizeof(float4));
+
+            for (di = 0; di < cfg->detnum; di++) {
+                cJSON* d = cJSON_GetArrayItem(ddir, di);
+
+                if (d && d->child) {
+                    cfg->detdir[di].x = d->child->valuedouble;
+
+                    if (d->child->next) {
+                        cfg->detdir[di].y = d->child->next->valuedouble;
+                    }
+
+                    if (d->child->next && d->child->next->next) {
+                        cfg->detdir[di].z = d->child->next->next->valuedouble;
+                    }
+
+                    if (d->child->next && d->child->next->next && d->child->next->next->next) {
+                        cfg->detdir[di].w = d->child->next->next->next->valuedouble;
+                    }
+                }
+            }
+        }
     }
 
     if (cfg->meshtag[0] == '\0' && cfg->nodenum == 0) {
@@ -3599,6 +3702,14 @@ void mcx_parsecmd(int argc, char* argv[], mcconfig* cfg) {
         MMC_ERROR(-1, "Jacobian output is only valid in the reply mode. Please give an mch file after '-E'.");
     }
 
+    if (MCX_IS_ADJOINT_TYPE(cfg->outputtype) && cfg->seed == SEED_FROM_FILE) {
+        MMC_ERROR(-1, "Adjoint Jacobian output is not valid in replay mode.");
+    }
+
+    if (MCX_IS_ADJOINT_TYPE(cfg->outputtype) && cfg->method != rtBLBadouelGrid) {
+        MMC_ERROR(-1, "Adjoint Jacobian output currently requires grid output (method G). Please use -M G.");
+    }
+
     if (cfg->isgpuinfo != 2) { /*print gpu info only*/
         if (isinteractive == 2 && jsoninput) {
             mcx_loadfromjson(jsoninput, cfg);
@@ -3756,9 +3867,15 @@ where possible parameters include (the first item in [] is the default value)\n\
 \n"S_BOLD S_CYAN"\
 == Output options ==\n"S_RESET"\
  -s sessionid  (--session)     a string used to tag all output file names\n\
- -O [X|XFEJLP] (--outputtype)  X - output flux, F - fluence, E - energy density\n\
+ -O [X|XFEJLP...] (--outputtype) X - output flux, F - fluence, E - energy density\n\
                                J - Jacobian, L - weighted path length, P -\n\
                                weighted scattering count (J,L,P: replay mode)\n\
+                               R - RF forward (complex fluence, set omega)\n\
+                               A - adjoint mua Jacobian (grid mode, set detdir)\n\
+                               D - adjoint D-coefficient Jacobian\n\
+                               U - adjoint mus Jacobian, V - adjoint musp Jacobian\n\
+                               W - dual adjoint [J_mua, J_D]\n\
+                               Q - dual adjoint [J_mua, J_musp']\n\
  -d [0|1]      (--savedet)     1 to save photon info at detectors,0 not to save\n\
  -H [1000000] (--maxdetphoton) max number of detected photons\n\
  -S [1|0]      (--save2pt)     1 to save the fluence field, 0 do not save\n\

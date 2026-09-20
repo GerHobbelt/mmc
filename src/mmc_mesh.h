@@ -90,7 +90,7 @@ typedef struct MMC_mesh {
     int nf;                /**< number of surface triangles */
     int prop;              /**< number of media */
     int elemlen;           /**< number of nodes per element */
-    FLOAT3* node;          /**< node coordinates, FLOAT3 is defined in vector_types.h, it is the true float3, which has a size of 12 byte */
+    FLOAT3* node;       /**< node coordinates */
     int*  elem;            /**< element indices */
     int*  elem2;           /**< element indices */
     float* edgeroi;        /**< immc: vessel edge radii */
@@ -103,13 +103,21 @@ typedef struct MMC_mesh {
     int*  type;            /**< element-based media index */
     int*  facenb;          /**< face neighbors, idx of the element sharing a face */
     medium* med;           /**< optical property of different media */
+    float* atte;           /**< precomputed attenuation for each media */
     double* weight;        /**< volumetric fluence for all nodes at all time-gates */
     double* dref;          /**< surface diffuse reflectance */
     float* evol;           /**< volume of an element */
     float* nvol;           /**< voronoi volume of a node */
     float4 nmin;           /**< lower-corner of the mesh bounding box */
     float4 nmax;           /**< upper-corner of the mesh bounding box */
+    uint nface;            /**< number of triangular meshes */
+    FLOAT3* fnode;         /**< triangular mesh nodes */
+    uint3* face;           /**< triangular meshes */
+    FLOAT3* fnorm;         /**< face normal: pointing from back to front */
+    uint* front;           /**< front face medium */
+    uint* back;            /**< back face medium */
 } tetmesh;
+
 
 /***************************************************************************//**
 \struct MMC_raytracer simpmesh.h
@@ -146,6 +154,7 @@ void mesh_build(tetmesh* mesh);
 void mesh_error(const char* msg, const char* file, const int linenum);
 void mesh_filenames(const char* format, char* foutput, mcconfig* cfg);
 void mesh_saveweight(tetmesh* mesh, mcconfig* cfg, int isref);
+void mesh_savejacob(mcconfig* cfg, float* jac, int Ns, int Nd, int isrfforward, int isdual);
 void mesh_savedetphoton(float* ppath, void* seeds, int count, int seedbyte, mcconfig* cfg);
 void mesh_getdetimage(float* detmap, float* ppath, int count, mcconfig* cfg, tetmesh* mesh);
 void mesh_savedetimage(float* detmap, mcconfig* cfg);
@@ -319,6 +328,7 @@ static inline float mmc_rsqrtf(float a) {
 #endif
 }
 
+#ifndef __NVCC__
 static inline void rotatevector(float3* dir, float stheta, float ctheta, float sphi, float cphi) {
     float3 p;
     float tmp0;
@@ -340,5 +350,6 @@ static inline void rotatevector(float3* dir, float stheta, float ctheta, float s
     dir->y = p.y * tmp0;
     dir->z = p.z * tmp0;
 }
+#endif /* __NVCC__ */
 
 #endif

@@ -140,6 +140,12 @@ void mesh_init(tetmesh* mesh) {
     mesh->nmax.y = -VERY_BIG;
     mesh->nmax.z = -VERY_BIG;
     mesh->nmax.w = 1.f;
+    mesh->nface = 0;
+    mesh->fnode = NULL;
+    mesh->fnorm = NULL;
+    mesh->face = NULL;
+    mesh->front = NULL;
+    mesh->back = NULL;
 }
 
 
@@ -333,7 +339,6 @@ void mesh_filenames(const char* format, char* foutput, mcconfig* cfg) {
         sprintf(foutput, "%s", filename);
     }
 }
-
 
 void mesh_createdualmesh(tetmesh* mesh, mcconfig* cfg) {
     int i;
@@ -935,6 +940,31 @@ void mesh_getvolume(tetmesh* mesh, mcconfig* cfg) {
             mesh->nvol[ee[j] - 1] += mesh->evol[i] * 0.25f;
         }
     }
+
+    if (mesh->fnode) {
+        free(mesh->fnode);
+        mesh->fnode = NULL;
+    }
+
+    if (mesh->fnorm) {
+        free(mesh->fnorm);
+        mesh->fnorm = NULL;
+    }
+
+    if (mesh->face) {
+        free(mesh->face);
+        mesh->face = NULL;
+    }
+
+    if (mesh->front) {
+        free(mesh->front);
+        mesh->front = NULL;
+    }
+
+    if (mesh->back) {
+        free(mesh->back);
+        mesh->back = NULL;
+    }
 }
 
 /**
@@ -1063,6 +1093,80 @@ void tracer_init(raytracer* tracer, tetmesh* pmesh, char methodid) {
 
 void tracer_prep(raytracer* tracer, mcconfig* cfg) {
     int i, j, k, ne = tracer->mesh->ne;
+
+    if (cfg->compute == cbOptiX) {
+        tetmesh* pmesh = tracer->mesh;
+        int* fnb = (int*)malloc(pmesh->ne * pmesh->elemlen * sizeof(int));
+        memcpy(fnb, tracer->mesh->facenb, (pmesh->ne * pmesh->elemlen) * sizeof(int));
+
+        // copy node from a float4 array into a float3 array
+        if (pmesh->fnode) {
+            free(pmesh->fnode);
+        }
+
+        pmesh->fnode = (FLOAT3*)malloc(pmesh->nn * sizeof(FLOAT3));
+
+        for (int i = 0; i < pmesh->nn; ++i) {
+            pmesh->fnode[i].x = pmesh->node[i].x;
+            pmesh->fnode[i].y = pmesh->node[i].y;
+            pmesh->fnode[i].z = pmesh->node[i].z;
+        }
+
+        // find triangle meshes, front and back medium types
+        pmesh->nface = 0;
+        pmesh->face = (uint3*)malloc((pmesh->ne * pmesh->elemlen) * sizeof(uint3));
+        pmesh->fnorm = (FLOAT3*)malloc((pmesh->ne * pmesh->elemlen) * sizeof(FLOAT3));
+        pmesh->front = (uint*)malloc((pmesh->ne * pmesh->elemlen) * sizeof(uint));
+        pmesh->back = (uint*)malloc((pmesh->ne * pmesh->elemlen) * sizeof(uint));
+        FLOAT3 v0, v1, v2, vec01, vec02, vnorm;
+
+        for (int i = 0; i < pmesh->ne; ++i) {
+            for (int j = 0; j < pmesh->elemlen; ++j) {
+                int nexteid = fnb[(i * pmesh->elemlen) + j];
+
+                if ((nexteid > 0 && pmesh->type[nexteid - 1] != pmesh->type[i]) || nexteid == 0) {
+                    // face node
+                    pmesh->face[pmesh->nface].x = pmesh->elem[(i * pmesh->elemlen) + out[ifaceorder[j]][0]] - 1;
+                    pmesh->face[pmesh->nface].y = pmesh->elem[(i * pmesh->elemlen) + out[ifaceorder[j]][1]] - 1;
+                    pmesh->face[pmesh->nface].z = pmesh->elem[(i * pmesh->elemlen) + out[ifaceorder[j]][2]] - 1;
+                    // face norm: pointing from back to front
+                    v0 = pmesh->fnode[pmesh->face[pmesh->nface].x];
+                    v1 = pmesh->fnode[pmesh->face[pmesh->nface].y];
+                    v2 = pmesh->fnode[pmesh->face[pmesh->nface].z];
+                    vec_diff((float3*)&v0, (float3*)&v1, (float3*)&vec01);
+                    vec_diff((float3*)&v0, (float3*)&v2, (float3*)&vec02);
+                    vec_cross((float3*)&vec01, (float3*)&vec02, (float3*)&vnorm);
+                    float mag = 1.0f / sqrtf(vec_dot((float3*)&vnorm, (float3*)&vnorm));
+                    vec_mult((float3*)&vnorm, mag, (float3*)&vnorm);
+                    pmesh->fnorm[pmesh->nface] = vnorm;
+                    // front and back media types
+                    pmesh->front[pmesh->nface] = ((nexteid == 0) ? 0 : pmesh->type[nexteid - 1]);
+                    pmesh->back[pmesh->nface] = pmesh->type[i];
+                    fnb[(i * pmesh->elemlen) + j] = -1;
+
+                    if (nexteid > 0) {
+                        for (int k = 0; k < pmesh->elemlen; ++k) {
+                            if (fnb[((nexteid - 1) * pmesh->elemlen) + k] == i + 1) {
+                                fnb[((nexteid - 1) * pmesh->elemlen) + k] = -1;
+                                break;
+                            }
+                        }
+                    }
+
+                    ++pmesh->nface;
+                }
+            }
+        }
+
+        pmesh->face = (uint3*)realloc(pmesh->face, pmesh->nface * sizeof(uint3));
+        pmesh->fnorm = (FLOAT3*)realloc(pmesh->fnorm, pmesh->nface * sizeof(FLOAT3));
+        pmesh->front = (uint*)realloc(pmesh->front, pmesh->nface * sizeof(uint));
+        pmesh->back = (uint*)realloc(pmesh->back, pmesh->nface * sizeof(uint));
+
+        if (fnb) {
+            free(fnb);
+        }
+    }
 
     if (tracer->n == NULL && tracer->m == NULL && tracer->d == NULL) {
         if (tracer->mesh != NULL) {
@@ -1289,7 +1393,7 @@ void tracer_build(raytracer* tracer) {
             ebase = i << 2;
 
             for (j = 0; j < 4; j++) {
-                float3* vecN = tracer->m + 3 * (ebase + j);
+                float4* vecN = tracer->m + 3 * (ebase + j);
 
                 ea = elems[ebase + out[j][0]] - 1;
                 eb = elems[ebase + out[j][1]] - 1;
@@ -1528,6 +1632,150 @@ void mesh_saveweight(tetmesh* mesh, mcconfig* cfg, int isref) {
     }
 
     fclose(fp);
+}
+
+/**
+ * @brief Save adjoint Jacobian output to a JNIfTI/BJNIfTI file (standalone mode only)
+ *
+ * Saves one or two Jacobian components (mua/D/mus/musp) as float32 data to files named
+ * "session_jXXX.jnii" or ".bnii".  The first component is written to "session_j<name1>.jnii"
+ * and, for dual output types, the second component to "session_j<name2>.jnii".
+ *
+ * @param[in] cfg: simulation configuration (uses outputtype, outputformat, session, rootpath)
+ * @param[in] jac: float buffer holding the Jacobian (layout: [Re_J1,Re_J2,Im_J1,Im_J2]*adjlen)
+ * @param[in] Ns: number of forward source slots
+ * @param[in] Nd: number of detector slots
+ * @param[in] isrfforward: 1 if RF mode (complex Jacobian), 0 for CW
+ * @param[in] isdual: 1 for dual types (two Jacobians), 0 for single
+ */
+
+void mesh_savejacob(mcconfig* cfg, float* jac, int Ns, int Nd, int isrfforward, int isdual) {
+    char name[MAX_FULL_PATH];
+    size_t adjlen = (size_t)cfg->crop0.z * Ns * Nd;
+
+    /* Jacobian component name suffixes per output type */
+    const char* suffix1 = "jmua";   /* first (or only) Jacobian component */
+    const char* suffix2 = "jd";     /* second Jacobian component (dual types only) */
+
+    switch (cfg->outputtype) {
+        case otAdjoint:
+            suffix1 = "jmua";
+            break;
+
+        case otAdjointDcoeff:
+            suffix1 = "jd";
+            break;
+
+        case otAdjointMus:
+            suffix1 = "jmus";
+            break;
+
+        case otAdjointMusp:
+            suffix1 = "jmusp";
+            break;
+
+        case otAdjointMuaD:
+            suffix1 = "jmua";
+            suffix2 = "jd";
+            break;
+
+        case otAdjointMuaMusp:
+            suffix1 = "jmua";
+            suffix2 = "jmusp";
+            break;
+
+        default:
+            suffix1 = "jacobian";
+            break;
+    }
+
+    /* Dimensions: [Nx, Ny, Nz, maxgate, Ns*Nd] */
+    uint jdims[5] = {(uint)cfg->dim.x, (uint)cfg->dim.y, (uint)cfg->dim.z,
+                     (uint)cfg->maxgate, (uint)(Ns * Nd)
+                    };
+    float jvoxsz[5] = {cfg->steps.x, cfg->steps.y, cfg->steps.z, cfg->tstep, 1.f};
+
+    /* RF: pack real and imaginary parts; for single-component: [Re, Im] */
+    /* Build output format selection for save */
+    int jndim = 5;
+    uint jdims_ri[6];
+    float jvoxsz_ri[6];
+
+    if (isrfforward) {
+        /* For RF: save real+imaginary interleaved as extra dimension [Nx,Ny,Nz,maxgate,Ns*Nd,2] */
+        memcpy(jdims_ri, jdims, sizeof(jdims));
+        memcpy(jvoxsz_ri, jvoxsz, sizeof(jvoxsz));
+        jdims_ri[5] = 2;
+        jvoxsz_ri[5] = 1.f;
+        jndim = 6;
+    }
+
+    /* Save first Jacobian component */
+    if (cfg->rootpath[0]) {
+        snprintf(name, sizeof(name), "%s/%s_%s", cfg->rootpath, cfg->session, suffix1);
+    } else {
+        snprintf(name, sizeof(name), "%s_%s", cfg->session, suffix1);
+    }
+
+    if (!isrfforward) {
+        /* CW: single real array of size adjlen */
+        if (cfg->outputformat == ofJNifti) {
+            mcx_savefloatjnii(jac, jndim, jdims, jvoxsz, name, cfg);
+        } else if (cfg->outputformat == ofBJNifti) {
+            mcx_savefloatbnii(jac, jndim, jdims, jvoxsz, name, cfg);
+        }
+    } else {
+        /* RF: Re(J1) in jac[0..adjlen-1], Im(J1) in jac[(isdual?2:1)*adjlen..] */
+        size_t imoffset = (isdual ? 2 : 1) * adjlen;
+        float* ribuf = (float*)malloc(sizeof(float) * 2 * adjlen);
+
+        if (ribuf) {
+            memcpy(ribuf,          jac,             adjlen * sizeof(float));
+            memcpy(ribuf + adjlen, jac + imoffset,  adjlen * sizeof(float));
+
+            if (cfg->outputformat == ofJNifti) {
+                mcx_savefloatjnii(ribuf, jndim, jdims_ri, jvoxsz_ri, name, cfg);
+            } else if (cfg->outputformat == ofBJNifti) {
+                mcx_savefloatbnii(ribuf, jndim, jdims_ri, jvoxsz_ri, name, cfg);
+            }
+
+            free(ribuf);
+        }
+    }
+
+    /* Save second Jacobian component for dual types */
+    if (isdual) {
+        if (cfg->rootpath[0]) {
+            snprintf(name, sizeof(name), "%s/%s_%s", cfg->rootpath, cfg->session, suffix2);
+        } else {
+            snprintf(name, sizeof(name), "%s_%s", cfg->session, suffix2);
+        }
+
+        if (!isrfforward) {
+            /* CW dual: second component starts at jac + adjlen */
+            if (cfg->outputformat == ofJNifti) {
+                mcx_savefloatjnii(jac + adjlen, jndim, jdims, jvoxsz, name, cfg);
+            } else if (cfg->outputformat == ofBJNifti) {
+                mcx_savefloatbnii(jac + adjlen, jndim, jdims, jvoxsz, name, cfg);
+            }
+        } else {
+            /* RF dual: Re(J2) in jac[adjlen..2*adjlen-1], Im(J2) in jac[3*adjlen..4*adjlen-1] */
+            float* ribuf2 = (float*)malloc(sizeof(float) * 2 * adjlen);
+
+            if (ribuf2) {
+                memcpy(ribuf2,          jac + adjlen,          adjlen * sizeof(float));
+                memcpy(ribuf2 + adjlen, jac + 3 * adjlen,      adjlen * sizeof(float));
+
+                if (cfg->outputformat == ofJNifti) {
+                    mcx_savefloatjnii(ribuf2, jndim, jdims_ri, jvoxsz_ri, name, cfg);
+                } else if (cfg->outputformat == ofBJNifti) {
+                    mcx_savefloatbnii(ribuf2, jndim, jdims_ri, jvoxsz_ri, name, cfg);
+                }
+
+                free(ribuf2);
+            }
+        }
+    }
 }
 
 /**
@@ -1929,7 +2177,11 @@ void mesh_validate(tetmesh* mesh, mcconfig* cfg) {
     }
 
     datalen = (cfg->method == rtBLBadouelGrid) ? cfg->crop0.z : ( (cfg->basisorder) ? mesh->nn : mesh->ne);
-    mesh->weight = (double*)calloc(sizeof(double) * datalen * cfg->srcnum, cfg->maxgate);
+    {
+        /* For adjoint Jacobian mode, field buffer needs nsrcslots = extrasrclen = srcnum + detnum slots */
+        int nsrcslots = (cfg->extrasrclen > cfg->srcnum) ? cfg->extrasrclen : cfg->srcnum;
+        mesh->weight = (double*)calloc(sizeof(double) * datalen * nsrcslots, cfg->maxgate);
+    }
 
     if (cfg->unitinmm != 1.f) {
         for (i = 1; i <= mesh->prop; i++) {

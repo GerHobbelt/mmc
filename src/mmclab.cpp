@@ -56,6 +56,9 @@
 #endif
 #include "mmc_tictoc.h"
 #include "mmc_raytrace.h"
+#if USE_OPTIX
+    #include "mmc_optix_host.h"
+#endif
 
 //! Macro to read the 1st scalar cfg member
 #define GET_1ST_FIELD(x,y)  if(strcmp(name,#y)==0) {double *val=mxGetPr(item);x->y=val[0];printf("mmc.%s=%g;\n",#y,(float)(x->y));}
@@ -107,7 +110,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
     mxArray*    tmp;
     int        ifield, jstruct;
     int        ncfg, nfields;
-    dimtype     fielddim[5];
+    dimtype     fielddim[6];
     int        errorflag = 0;
     cl_uint    workdev;
 
@@ -257,6 +260,48 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
 #endif
             mesh_srcdetelem(&mesh, &cfg);
 
+            /** Build srcdata from detectors for adjoint mode.
+             *  The field buffer uses nsrcslots = srcnum + detnum slots:
+             *    Slots 0..srcnum-1        : forward source photons (phi_src)
+             *    Slots srcnum..srcnum+detnum-1 : detector-as-source photons (phi_det)
+             *  The adjoint Jacobian kernel then computes J[vox,s,d] = phi_src[s] * phi_det[d].
+             */
+            if (MCX_IS_ADJOINT_TYPE(cfg.outputtype) && cfg.detnum > 0 && cfg.detdir != NULL) {
+                if (cfg.srcdata) {
+                    free(cfg.srcdata);
+                }
+
+                int Ns = cfg.srcnum;   /* number of forward source slots */
+                int Nd = cfg.detnum;   /* number of detector source slots */
+                cfg.extrasrclen = Ns + Nd;
+                cfg.srcdata = (ExtraSrc*)calloc(cfg.extrasrclen, sizeof(ExtraSrc));
+
+                /* Slots 0..Ns-1: forward sources (same position/direction as main source).
+                 * cfg.srcpos/srcdir are float4 (single source); only srcnum=1 is supported. */
+                for (int is = 0; is < Ns; is++) {
+                    cfg.srcdata[is].srcpos    = {cfg.srcpos.x, cfg.srcpos.y,
+                                                 cfg.srcpos.z, 1.f / Ns
+                                                };
+                    cfg.srcdata[is].srcdir    = {cfg.srcdir.x, cfg.srcdir.y,
+                                                 cfg.srcdir.z, 0.f
+                                                };
+                    cfg.srcdata[is].srcparam1 = cfg.srcparam1;
+                    cfg.srcdata[is].srcparam2 = cfg.srcparam2;
+                }
+
+                /* Slots Ns..Ns+Nd-1: detector-as-reversed-source */
+                for (int id = 0; id < Nd; id++) {
+                    cfg.srcdata[Ns + id].srcpos   = {cfg.detpos[id].x, cfg.detpos[id].y,
+                                                     cfg.detpos[id].z, 1.f / Nd
+                                                    };
+                    cfg.srcdata[Ns + id].srcdir   = {cfg.detdir[id].x, cfg.detdir[id].y,
+                                                     cfg.detdir[id].z, cfg.detdir[id].w
+                                                    };
+                    cfg.srcdata[Ns + id].srcparam1 = {cfg.detpos[id].w, 0.f, 0.f, 0.f};
+                    cfg.srcdata[Ns + id].srcparam2 = {0.f, 0.f, 0.f, 0.f};
+                }
+            }
+
             /** Validate all input fields, and warn incompatible inputs */
             mmc_validate_config(&cfg, detps, dimdetps, seedbyte);
             mesh_validate(&mesh, &cfg);
@@ -279,6 +324,12 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
 #ifdef USE_CUDA
                 else if (cfg.compute == cbCUDA) {
                     mmc_run_cu(&cfg, &mesh, &tracer);
+                }
+
+#endif
+#ifdef USE_OPTIX
+                else if (cfg.compute == cbOptiX) {
+                    mmc_run_optix(&cfg, &mesh, &tracer);
                 }
 
 #endif
@@ -373,46 +424,206 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
             }
 
             if (nlhs >= 1) {
+                int isrfforward = (cfg.omega > 0.f && cfg.seed != SEED_FROM_FILE);
+                int isadjoint = MCX_IS_ADJOINT_TYPE(cfg.outputtype);
+
+                /* In adjoint mode the weight buffer has nsrcslots = extrasrclen = Ns+Nd slots;
+                 * otherwise it is simply cfg.srcnum. The GPU layout for adjoint is
+                 * [dim.x, dim.y, dim.z, maxgate, nsrcslots] (slot index slowest). */
+                int nsrcslots = (isadjoint && cfg.extrasrclen > cfg.srcnum) ? cfg.extrasrclen : cfg.srcnum;
+
                 int datalen = (cfg.method == rtBLBadouelGrid) ? cfg.crop0.z : ( (cfg.basisorder) ? mesh.nn : mesh.ne);
-                fielddim[0] = cfg.srcnum;
+                fielddim[0] = nsrcslots;
                 fielddim[1] = datalen;
                 fielddim[2] = cfg.maxgate;
                 fielddim[3] = 0;
                 fielddim[4] = 0;
 
+                /* Always output forward fluence in flux.data.
+                 * In adjoint mode, flux.data has nsrcslots = srcnum+detnum slices (sources then
+                 * detectors-as-sources), and the Jacobian is returned separately in flux.jmua/jd/etc. */
                 if (cfg.method == rtBLBadouelGrid) {
-                    fielddim[0] = cfg.srcnum;
-                    fielddim[1] = cfg.dim.x;
-                    fielddim[2] = cfg.dim.y;
-                    fielddim[3] = cfg.dim.z;
-                    fielddim[4] = cfg.maxgate;
-
-                    if (cfg.srcnum > 1) {
-                        mxSetFieldByNumber(plhs[0], jstruct, 0, mmclab_assert(mxCreateNumericArray(5, fielddim, mxDOUBLE_CLASS, mxREAL)));
+                    /* Adjoint layout: [dim.x, dim.y, dim.z, maxgate, nsrcslots] (nsrcslots last).
+                     * Non-adjoint multi-source layout: [srcnum, dim.x, dim.y, dim.z, maxgate]. */
+                    if (isadjoint && nsrcslots > 1) {
+                        fielddim[0] = cfg.dim.x;
+                        fielddim[1] = cfg.dim.y;
+                        fielddim[2] = cfg.dim.z;
+                        fielddim[3] = cfg.maxgate;
+                        fielddim[4] = nsrcslots;
                     } else {
-                        mxSetFieldByNumber(plhs[0], jstruct, 0, mmclab_assert(mxCreateNumericArray(4, &fielddim[1], mxDOUBLE_CLASS, mxREAL)));
+                        fielddim[0] = cfg.srcnum;
+                        fielddim[1] = cfg.dim.x;
+                        fielddim[2] = cfg.dim.y;
+                        fielddim[3] = cfg.dim.z;
+                        fielddim[4] = cfg.maxgate;
+                    }
+
+                    mxComplexity cplx = (isrfforward && cfg.exportadjoint) ? mxCOMPLEX : mxREAL;
+
+                    if (isadjoint && nsrcslots > 1) {
+                        mxSetFieldByNumber(plhs[0], jstruct, 0, mmclab_assert(mxCreateNumericArray(5, fielddim, mxDOUBLE_CLASS, cplx)));
+                    } else if (cfg.srcnum > 1) {
+                        mxSetFieldByNumber(plhs[0], jstruct, 0, mmclab_assert(mxCreateNumericArray(5, fielddim, mxDOUBLE_CLASS, cplx)));
+                    } else {
+                        mxSetFieldByNumber(plhs[0], jstruct, 0, mmclab_assert(mxCreateNumericArray(4, &fielddim[1], mxDOUBLE_CLASS, cplx)));
                     }
                 } else {
-                    if (cfg.srcnum > 1) {
+                    if (nsrcslots > 1) {
                         mxSetFieldByNumber(plhs[0], jstruct, 0, mmclab_assert(mxCreateNumericArray(3, fielddim, mxDOUBLE_CLASS, mxREAL)));
                     } else {
                         mxSetFieldByNumber(plhs[0], jstruct, 0, mmclab_assert(mxCreateNumericArray(2, &fielddim[1], mxDOUBLE_CLASS, mxREAL)));
                     }
                 }
 
-                double* output = (double*)mxGetPr(mxGetFieldByNumber(plhs[0], jstruct, 0));
+                mxArray* outfield = mxGetFieldByNumber(plhs[0], jstruct, 0);
+                size_t nelem = (size_t)nsrcslots * datalen * cfg.maxgate;
 
-                if (output == NULL) {
-                    mexErrMsgTxt("MMCLAB failed to allocate memory!");
+                if (isrfforward && cfg.exportadjoint) {
+#if MX_HAS_INTERLEAVED_COMPLEX
+                    mxComplexDouble* cptr = mxGetComplexDoubles(outfield);
+
+                    if (cptr) {
+                        for (size_t ii = 0; ii < nelem; ii++) {
+                            cptr[ii].real = mesh.weight[ii];
+                            cptr[ii].imag = (double)cfg.exportadjoint[ii];
+                        }
+                    }
+
+#else
+                    double* output = (double*)mxGetPr(outfield);
+                    double* imoutput = (double*)mxGetPi(outfield);
+
+                    if (output == NULL) {
+                        mexErrMsgTxt("MMCLAB failed to allocate memory!");
+                    }
+
+                    memcpy(output, mesh.weight, nelem * sizeof(double));
+
+                    if (imoutput) {
+                        for (size_t ii = 0; ii < nelem; ii++) {
+                            imoutput[ii] = (double)cfg.exportadjoint[ii];
+                        }
+                    }
+
+#endif
+                } else {
+                    double* output = (double*)mxGetPr(outfield);
+
+                    if (output == NULL) {
+                        mexErrMsgTxt("MMCLAB failed to allocate memory!");
+                    }
+
+                    memcpy(output, mesh.weight, nelem * sizeof(double));
                 }
-
-                memcpy(output, mesh.weight, cfg.srcnum * datalen * cfg.maxgate * sizeof(double));
 
                 if (cfg.issaveref) {      /** save diffuse reflectance */
                     fielddim[1] = mesh.nf;
                     fielddim[2] = cfg.maxgate;
                     mxSetFieldByNumber(plhs[0], jstruct, 1, mmclab_assert(mxCreateNumericArray(2, &fielddim[1], mxDOUBLE_CLASS, mxREAL)));
                     memcpy((double*)mxGetPr(mxGetFieldByNumber(plhs[0], jstruct, 1)), mesh.dref, fielddim[1]*fielddim[2]*sizeof(double));
+                }
+
+                /* Output adjoint Jacobian in separate struct fields (flux.jmua, flux.jd, etc.) */
+                if (isadjoint && cfg.exportjacob && cfg.method == rtBLBadouelGrid) {
+                    int Ns = (cfg.extrasrclen > cfg.detnum) ? (cfg.extrasrclen - cfg.detnum) : 1;
+                    int Nd = (cfg.detnum > 0)               ?  cfg.detnum                   : 1;
+                    int nsrcpairs = Ns * Nd;
+                    int isdual = MCX_IS_DUAL_ADJOINT_TYPE(cfg.outputtype);
+                    mxComplexity jcplx = isrfforward ? mxCOMPLEX : mxREAL;
+                    size_t adjlen = (size_t)cfg.dim.x * cfg.dim.y * cfg.dim.z * cfg.maxgate * nsrcpairs;
+
+                    fielddim[0] = cfg.dim.x;
+                    fielddim[1] = cfg.dim.y;
+                    fielddim[2] = cfg.dim.z;
+                    fielddim[3] = cfg.maxgate;
+                    fielddim[4] = nsrcpairs;
+
+                    /* Determine Jacobian field name(s) based on output type */
+                    const char* jname1 = "jmua";
+                    const char* jname2 = "jd";
+
+                    switch (cfg.outputtype) {
+                        case otAdjoint:
+                            jname1 = "jmua";
+                            break;
+
+                        case otAdjointDcoeff:
+                            jname1 = "jd";
+                            break;
+
+                        case otAdjointMus:
+                            jname1 = "jmus";
+                            break;
+
+                        case otAdjointMusp:
+                            jname1 = "jmusp";
+                            break;
+
+                        case otAdjointMuaD:
+                            jname1 = "jmua";
+                            jname2 = "jd";
+                            break;
+
+                        case otAdjointMuaMusp:
+                            jname1 = "jmua";
+                            jname2 = "jmusp";
+                            break;
+
+                        default:
+                            break;
+                    }
+
+                    /* Helper: create and populate a Jacobian field (float32, real or complex) */
+                    auto add_jac_field = [&](const char* fname, float * re_data, float * im_data) {
+                        if (mxGetFieldNumber(plhs[0], fname) < 0) {
+                            mxAddField(plhs[0], fname);
+                        }
+
+                        mxArray* jfield = mmclab_assert(mxCreateNumericArray(5, fielddim, mxSINGLE_CLASS, jcplx));
+
+                        if (!isrfforward) {
+                            memcpy((float*)mxGetData(jfield), re_data, adjlen * sizeof(float));
+                        } else {
+#if MX_HAS_INTERLEAVED_COMPLEX
+                            mxComplexSingle* cptr = mxGetComplexSingles(jfield);
+
+                            if (cptr) {
+                                for (size_t ii = 0; ii < adjlen; ii++) {
+                                    cptr[ii].real = re_data[ii];
+                                    cptr[ii].imag = im_data[ii];
+                                }
+                            }
+
+#else
+                            memcpy((float*)mxGetData(jfield), re_data, adjlen * sizeof(float));
+                            float* jpi = (float*)mxGetImagData(jfield);
+
+                            if (jpi) {
+                                memcpy(jpi, im_data, adjlen * sizeof(float));
+                            }
+
+#endif
+                        }
+
+                        mxSetField(plhs[0], jstruct, fname, jfield);
+                    };
+
+                    /* Pointer arithmetic into exportjacob:
+                     * CW non-dual:  [re1(adjlen)]
+                     * CW dual:      [re1(adjlen), re2(adjlen)]
+                     * RF non-dual:  [re1(adjlen), im1(adjlen)]
+                     * RF dual:      [re1(adjlen), re2(adjlen), im1(adjlen), im2(adjlen)] */
+                    float* re1 = cfg.exportjacob;
+                    float* re2 = isdual               ? cfg.exportjacob + adjlen         : NULL;
+                    float* im1 = isrfforward          ? cfg.exportjacob + (isdual ? 2 : 1) * adjlen : NULL;
+                    float* im2 = (isrfforward && isdual) ? cfg.exportjacob + 3 * adjlen : NULL;
+
+                    add_jac_field(jname1, re1, im1);
+
+                    if (isdual) {
+                        add_jac_field(jname2, re2, im2);
+                    }
                 }
             }
 
@@ -513,10 +724,12 @@ void mmc_set_field(const mxArray* root, const mxArray* item, int idx, mcconfig* 
         }
 
         mesh->node = (FLOAT3*)calloc(sizeof(FLOAT3), mesh->nn);
+        mesh->fnode = (FLOAT3*)calloc(sizeof(FLOAT3), mesh->nn);
 
         for (j = 0; j < 3; j++)
             for (i = 0; i < mesh->nn; i++) {
                 ((float*)(&mesh->node[i]))[j] = val[j * mesh->nn + i];
+                ((float*)(&mesh->fnode[i]))[j] = val[j * mesh->nn + i];
             }
 
         printf("mmc.nn=%d;\n", mesh->nn);
@@ -741,9 +954,45 @@ void mmc_set_field(const mxArray* root, const mxArray* item, int idx, mcconfig* 
 
         cfg->debuglevel = mcx_parsedebugopt(buf, debugflag);
         printf("mmc.debuglevel='%s';\n", buf);
+    } else if (strcmp(name, "compileropt") == 0) {
+        int len = mxGetNumberOfElements(item);
+
+        if (!mxIsChar(item) || len == 0) {
+            mexErrMsgTxt("the 'compileropt' field must be a non-empty string");
+        }
+
+        if (len > MAX_PATH_LENGTH) {
+            mexErrMsgTxt("the 'compileropt' field is too long");
+        }
+
+        int status = mxGetString(item, cfg->compileropt, MAX_PATH_LENGTH);
+
+        if (status != 0) {
+            mexWarnMsgTxt("not enough space. string is truncated.");
+        }
+
+        printf("mcx.compileropt='%s';\n", cfg->compileropt);
+    } else if (strcmp(name, "kernelfile") == 0) {
+        int len = mxGetNumberOfElements(item);
+
+        if (!mxIsChar(item) || len == 0) {
+            mexErrMsgTxt("the 'kernelfile' field must be a non-empty string");
+        }
+
+        if (len > MAX_SESSION_LENGTH) {
+            mexErrMsgTxt("the 'kernelfile' field is too long");
+        }
+
+        int status = mxGetString(item, cfg->kernelfile, MAX_SESSION_LENGTH);
+
+        if (status != 0) {
+            mexWarnMsgTxt("not enough space. string is truncated.");
+        }
+
+        printf("mcx.kernelfile=string of %d;\n", len);
     } else if (strcmp(name, "srctype") == 0) {
         int len = mxGetNumberOfElements(item);
-        const char* srctypeid[] = {"pencil", "isotropic", "cone", "gaussian", "planar", "pattern", "fourier", "arcsine", "disk", "fourierx", "fourierx2d", "zgaussian", "line", "slit", ""};
+        const char* srctypeid[] = {"pencil", "isotropic", "cone", "gaussian", "planar", "pattern", "fourier", "arcsine", "disk", "fourierx", "fourierx2d", "zgaussian", "line", "slit", "pencilarray", "pattern3d", "hyperboloid", "ring", ""};
         char strtypestr[MAX_SESSION_LENGTH] = {'\0'};
 
         if (!mxIsChar(item) || len == 0) {
@@ -835,7 +1084,9 @@ void mmc_set_field(const mxArray* root, const mxArray* item, int idx, mcconfig* 
         printf("mmc.method='%s';\n", methodstr);
     } else if (strcmp(name, "outputtype") == 0) {
         int len = mxGetNumberOfElements(item);
-        const char* outputtype[] = {"flux", "fluence", "energy", "jacobian", "wl", "wp", ""};
+        const char* outputtype[] = {"flux", "fluence", "energy", "jacobian", "wl", "wp",
+                                    "rf", "rfmus", "adjoint", "adjoint_dcoeff", "adjoint_mus", "adjoint_musp", "adjoint_mua_d", "adjoint_mua_musp", ""
+                                   };
         char outputstr[MAX_SESSION_LENGTH] = {'\0'};
 
         if (!mxIsChar(item) || len == 0) {
@@ -859,9 +1110,35 @@ void mmc_set_field(const mxArray* root, const mxArray* item, int idx, mcconfig* 
         }
 
         printf("mmc.outputtype='%s';\n", outputstr);
+    } else if (strcmp(name, "omega") == 0) {
+        double* val = mxGetPr(item);
+        cfg->omega = (float)val[0];
+        printf("mmc.omega=%g;\n", cfg->omega);
+    } else if (strcmp(name, "detdir") == 0) {
+        arraydim = mxGetDimensions(item);
+
+        if (arraydim[0] > 0 && arraydim[1] != 4) {
+            MEXERROR("the 'detdir' field must have 4 columns (dx,dy,dz,focal)");
+        }
+
+        double* val = mxGetPr(item);
+        int nd = arraydim[0];
+
+        if (cfg->detdir) {
+            free(cfg->detdir);
+        }
+
+        cfg->detdir = (float4*)malloc(nd * sizeof(float4));
+
+        for (j = 0; j < 4; j++)
+            for (i = 0; i < nd; i++) {
+                ((float*)(&cfg->detdir[i]))[j] = val[j * nd + i];
+            }
+
+        printf("mmc.detdir=[%d,4];\n", nd);
     } else if (strcmp(name, "compute") == 0) {
         int len = mxGetNumberOfElements(item);
-        const char* computebackend[] = {"sse", "opencl", "cuda", ""};
+        const char* computebackend[] = {"sse", "opencl", "cuda", "optix", ""};
         char computestr[MAX_SESSION_LENGTH] = {'\0'};
 
         if (!mxIsChar(item) || len == 0) {

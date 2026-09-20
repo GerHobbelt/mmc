@@ -39,7 +39,7 @@
 #define _MMC_UTILITIES_H
 
 #include <stdio.h>
-#include "vector_types.h"
+#include "mmc_vector_types.h"
 #include "cjson/cJSON.h"
 
 #ifdef _OPENMP                      ///< use multi-threading for running simulation on multiple GPUs
@@ -96,13 +96,19 @@ enum TDebugLevel {dlMove = 1, dlTracing = 2, dlBary = 4, dlWeight = 8, dlDist = 
 
 enum TRTMethod {rtPlucker, rtHavel, rtBadouel, rtBLBadouel, rtBLBadouelGrid};
 enum TMCMethod {mmMCX, mmMCML};
-enum TComputeBackend {cbSSE, cbOpenCL, cbCUDA};
+enum TComputeBackend {cbSSE, cbOpenCL, cbCUDA, cbOptiX};
 
 enum TSrcType {stPencil, stIsotropic, stCone, stGaussian, stPlanar,
                stPattern, stFourier, stArcSin, stDisk, stFourierX,
-               stFourier2D, stZGaussian, stLine, stSlit
+               stFourier2D, stZGaussian, stLine, stSlit,
+               stPencilArray, stPattern3D, stHyperboloid, stRing
               };
-enum TOutputType {otFlux, otFluence, otEnergy, otJacobian, otWL, otWP};
+enum TOutputType {otFlux, otFluence, otEnergy, otJacobian, otWL, otWP,
+                  otRF, otRFmus,
+                  otAdjoint, otAdjointDcoeff, otAdjointMus, otAdjointMusp, otAdjointMuaD, otAdjointMuaMusp
+                 };
+#define MCX_IS_ADJOINT_TYPE(t)      ((int)(t) >= (int)otAdjoint)
+#define MCX_IS_DUAL_ADJOINT_TYPE(t) ((int)(t) >= (int)otAdjointMuaD)
 enum TOutputFormat {ofASCII, ofBin, ofNifti, ofAnalyze, ofMC2, ofTX3, ofJNifti, ofBJNifti};
 enum TOutputDomain {odMesh, odGrid};
 enum TDeviceVendor {dvUnknown, dvNVIDIA, dvAMD, dvIntel, dvIntelGPU, dvAppleCPU, dvAppleGPU};
@@ -132,6 +138,17 @@ in 1/mm, the refractive index (n) and anisotropy (g).
  * \brief The structure to store optical properties
  * Four relevant optical properties are needed
  */
+
+/** \brief Extra source entry for multi-source / adjoint-mode simulation */
+#ifndef MCX_EXTRASRC_DEFINED
+#define MCX_EXTRASRC_DEFINED
+typedef struct MCX_ExtraSrc {
+    float4 srcpos;      /**< position and launch-weight (w component = importance) */
+    float4 srcdir;      /**< direction and focal length (w component) */
+    float4 srcparam1;   /**< source parameters set 1: x=radius for disk source */
+    float4 srcparam2;   /**< source parameters set 2 */
+} ExtraSrc;
+#endif
 
 typedef struct MMC_medium {
     float mua;                     /**<absorption coeff in 1/mm unit*/
@@ -194,7 +211,7 @@ typedef struct MMC_config {
     int nthread;                   /**<num of total threads, multiple of 128*/
     int seed;                      /**<random number generator seed*/
     int e0;                        /**<initial element id*/
-    float3 srcpos;                 /**<src position in mm*/
+    float4 srcpos;                 /**<src position in mm*/
     float4 srcdir;                 /**<src normal direction*/
     int srctype;                   /**<src type: 0 - pencil beam, 1 - isotropic ... */
     float4 srcparam1;              /**<source parameters set 1*/
@@ -205,7 +222,7 @@ typedef struct MMC_config {
     float tstart;                  /**<start time in second*/
     float tstep;                   /**<time step in second*/
     float tend;                    /**<end time in second*/
-    float3 steps;                  /**<voxel sizes along x/y/z in mm*/
+    float3 steps;               /**<voxel sizes along x/y/z in mm*/
     uint3 dim;                     /**<dim.x is the initial element number in MMC, dim.y is faceid*/
     uint4 crop0;                   /**<sub-volume for cache*/
     uint4 crop1;                   /**<the other end of the caching box*/
@@ -218,6 +235,7 @@ typedef struct MMC_config {
                                        normalization error when using non-atomic write*/
     medium* prop;                  /**<optical property mapping table*/
     float4* detpos;                /**<detector positions and radius, overwrite detradius*/
+    float4* detdir;               /**<detector normal directions and focal lengths for adjoint mode (Nd x 4)*/
     float4 detparam1;              /**<parameters set 1 for wide-field detector*/
     float4 detparam2;              /**<parameters set 2 for wide-feild detector*/
     float* detpattern;             /**<detector pattern*/
@@ -252,6 +270,7 @@ typedef struct MMC_config {
     int  mcmethod;                 /**<0 use MCX-styled MC (micro-Beer-Lambert law), 1 use MCML-styled MC (Albedo-Weight)*/
     float roulettesize;            /**<number of roulette for termination*/
     float minenergy;               /**<minimum energy to propagate photon*/
+    float omega;                  /**<modulation angular frequency (rad/s) for RF forward simulation; 0 for CW*/
     float nout;                    /**<refractive index for the domain outside the mesh*/
     int isextdet;                  /**<if 1, there is external wide-field detector (marked by -2 in the mesh)*/
     FILE* flog;                    /**<stream handle to print log information*/
@@ -279,6 +298,10 @@ typedef struct MMC_config {
     unsigned char* exportseed;     /*memory buffer when returning the RNG seed to matlab*/
     float* exportdetected;         /*memory buffer when returning the partial length info to external programs such as matlab*/
     float* exportdebugdata;        /**<pointer to the buffer where the photon trajectory data are stored*/
+    float* exportadjoint;         /**<float buffer for RF imaginary fluence (forward mode only; preserved through adjoint post-processing)*/
+    float* exportjacob;           /**<float buffer for adjoint Jacobian output (separate from RF imaginary fluence)*/
+    ExtraSrc* srcdata;            /**<multi-source list for adjoint mode; length = extrasrclen*/
+    int extrasrclen;              /**<number of entries in srcdata (>0 for adjoint/multi-source mode)*/
     double* energytot;             /**<total energy launched for each source, a buffer of length srcnum */
     double* energyesc;             /**<total energy escaped for each source, a buffer of length srcnum */
     unsigned int detectedcount;    /**<total number of detected photons*/
@@ -339,8 +362,10 @@ void mcx_savejdata(char* filename, mcconfig* cfg);
 int  mcx_jdataencode(void* vol,  int ndim, uint* dims, char* type, int byte, int zipid, void* obj, int isubj, int iscol, mcconfig* cfg);
 int  mcx_jdatadecode(void** vol, int* ndim, uint* dims, int maxdim, char** type, cJSON* obj, mcconfig* cfg);
 void mcx_convertrow2col(float* vol, uint3* dim);
-void mcx_savejnii(OutputType* vol, int ndim, uint* dims, float* voxelsize, char* name, int isfloat, int iscol, mcconfig* cfg);
-void mcx_savebnii(OutputType* vol, int ndim, uint* dims, float* voxelsize, char* name, int isfloat, int iscol, mcconfig* cfg);
+void mcx_savejnii(void* vol, int ndim, uint* dims, float* voxelsize, char* name, int isfloat, int iscol, int elemsize, mcconfig* cfg);
+void mcx_savebnii(void* vol, int ndim, uint* dims, float* voxelsize, char* name, int isfloat, int iscol, int elemsize, mcconfig* cfg);
+void mcx_savefloatjnii(float* vol, int ndim, uint* dims, float* voxelsize, char* name, mcconfig* cfg);
+void mcx_savefloatbnii(float* vol, int ndim, uint* dims, float* voxelsize, char* name, mcconfig* cfg);
 void mcx_savejdet(float* ppath, void* seeds, uint count, int doappend, mcconfig* cfg);
 void mcx_fflush(FILE* out);
 void mmc_validate_config(mcconfig* cfg, float* detps, int dimdetps[2], int seedbyte);
