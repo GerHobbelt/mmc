@@ -2,7 +2,7 @@
 **  \mainpage Mesh-based Monte Carlo (MMC) - a 3D photon simulator
 **
 **  \author Qianqian Fang <q.fang at neu.edu>
-**  \copyright Qianqian Fang, 2010-2025
+**  \copyright Qianqian Fang, 2010-2026
 **
 **  \section sref Reference:
 **  \li \c (\b Fang2010) Qianqian Fang, <a href="http://www.opticsinfobase.org/abstract.cfm?uri=boe-1-1-165">
@@ -301,7 +301,7 @@ typedef struct MMC_FLOAT3 {
     #define MCX_SINCOS(theta,osin,ocos)   {(osin)=native_sin(theta);(ocos)=native_cos(theta);}
 #else
     #define MCX_MATHFUN(fun)              fun
-    #define MCX_SINCOS(theta,osin,ocos)   (ocos)=sincos((theta),&(osin))
+    #define MCX_SINCOS(theta,osin,ocos)   (osin)=sincos((theta),&(ocos))  /* OpenCL sincos returns sin, stores cos */
 #endif
 
 #ifdef MCX_SAVE_DETECTORS

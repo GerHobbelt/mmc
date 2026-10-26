@@ -2,7 +2,7 @@
 **  \mainpage Mesh-based Monte Carlo (MMC) - a 3D photon simulator
 **
 **  \author Qianqian Fang <q.fang at neu.edu>
-**  \copyright Qianqian Fang, 2010-2025
+**  \copyright Qianqian Fang, 2010-2026
 **
 **  \section sref Reference:
 **  \li \c (\b Fang2010) Qianqian Fang, <a href="http://www.opticsinfobase.org/abstract.cfm?uri=boe-1-1-165">
@@ -1044,7 +1044,7 @@ void mcx_savejdet(float* ppath, void* seeds, uint count, int doappend, mcconfig*
 
             cJSON_AddItemToObject(dat, dname[id], sub = cJSON_CreateObject());
 
-            if (mcx_jdataencode(buf, 2, dims, dtype[id], 4, cfg->zipid, sub, 0, 1, cfg)) {
+            if (mcx_jdataencode(buf, 2, dims, dtype[id], 4, cfg->zipid, sub, 0, 0, cfg)) {
                 MMC_ERROR(-1, "error when converting to JSON");
             }
 
@@ -1099,7 +1099,7 @@ void mcx_savejdet(float* ppath, void* seeds, uint count, int doappend, mcconfig*
 
                     cJSON_AddItemToObject(dat, "srcid", sub = cJSON_CreateObject());
 
-                    if (mcx_jdataencode((void*)srcid, 2, dims, dtype[id], 4, cfg->zipid, sub, 0, 1, cfg)) {
+                    if (mcx_jdataencode((void*)srcid, 2, dims, dtype[id], 4, cfg->zipid, sub, 0, 0, cfg)) {
                         MMC_ERROR(-1, "error when converting to JSON");
                     }
 
@@ -1108,7 +1108,7 @@ void mcx_savejdet(float* ppath, void* seeds, uint count, int doappend, mcconfig*
 
                 cJSON_AddItemToObject(dat, dname[id], sub = cJSON_CreateObject());
 
-                if (mcx_jdataencode(val, 2, dims, dtype[id], 4, cfg->zipid, sub, 0, 1, cfg)) {
+                if (mcx_jdataencode(val, 2, dims, dtype[id], 4, cfg->zipid, sub, 0, 0, cfg)) {
                     MMC_ERROR(-1, "error when converting to JSON");
                 }
 
@@ -1122,7 +1122,7 @@ void mcx_savejdet(float* ppath, void* seeds, uint count, int doappend, mcconfig*
         uint dims[2] = {count, cfg->his.seedbyte};
         cJSON_AddItemToObject(dat, "seed", sub = cJSON_CreateObject());
 
-        if (mcx_jdataencode(seeds, 2, dims, "uint8", 1, cfg->zipid, sub, 0, 1, cfg)) {
+        if (mcx_jdataencode(seeds, 2, dims, "uint8", 1, cfg->zipid, sub, 0, 0, cfg)) {
             MMC_ERROR(-1, "error when converting to JSON");
         }
     }
@@ -1243,7 +1243,7 @@ void mcx_savejdb(float* ppath, void* seeds, uint count, int doappend, mcconfig* 
             ubjw_write_key(root, dname[id]);
             ubjw_begin_object(root, UBJ_MIXED, 0);
 
-            if (mcx_jdataencode(buf, 2, dims, dtype[id], 4, cfg->zipid, root, 1, 1, cfg)) {
+            if (mcx_jdataencode(buf, 2, dims, dtype[id], 4, cfg->zipid, root, 1, 0, cfg)) {
                 MMC_ERROR(-1, "error when converting to JSON");
             }
 
@@ -1257,7 +1257,7 @@ void mcx_savejdb(float* ppath, void* seeds, uint count, int doappend, mcconfig* 
             ubjw_write_key(root, "seed");
             ubjw_begin_object(root, UBJ_MIXED, 0);
 
-            if (mcx_jdataencode(seeds, 2, dims, "uint8", 1, cfg->zipid, root, 1, 1, cfg)) {
+            if (mcx_jdataencode(seeds, 2, dims, "uint8", 1, cfg->zipid, root, 1, 0, cfg)) {
                 MMC_ERROR(-1, "error when converting to JSON");
             }
 
@@ -1312,7 +1312,7 @@ void mcx_savejdb(float* ppath, void* seeds, uint count, int doappend, mcconfig* 
                     ubjw_write_key(root, "srcid");
                     ubjw_begin_object(root, UBJ_MIXED, 0);
 
-                    if (mcx_jdataencode((void*)srcid, 2, dims, dtype[id], 4, cfg->zipid, root, 1, 1, cfg)) {
+                    if (mcx_jdataencode((void*)srcid, 2, dims, dtype[id], 4, cfg->zipid, root, 1, 0, cfg)) {
                         MMC_ERROR(-1, "error when converting to JSON");
                     }
 
@@ -1323,7 +1323,7 @@ void mcx_savejdb(float* ppath, void* seeds, uint count, int doappend, mcconfig* 
                 ubjw_write_key(root, dname[id]);
                 ubjw_begin_object(root, UBJ_MIXED, 0);
 
-                if (mcx_jdataencode(val, 2, dims, dtype[id], 4, cfg->zipid, root, 1, 1, cfg)) {
+                if (mcx_jdataencode(val, 2, dims, dtype[id], 4, cfg->zipid, root, 1, 0, cfg)) {
                     MMC_ERROR(-1, "error when converting to JSON");
                 }
 
@@ -1338,7 +1338,7 @@ void mcx_savejdb(float* ppath, void* seeds, uint count, int doappend, mcconfig* 
             ubjw_write_key(root, "seed");
             ubjw_begin_object(root, UBJ_MIXED, 0);
 
-            if (mcx_jdataencode(seeds, 2, dims, "uint8", 1, cfg->zipid, root, 1, 1, cfg)) {
+            if (mcx_jdataencode(seeds, 2, dims, "uint8", 1, cfg->zipid, root, 1, 0, cfg)) {
                 MMC_ERROR(-1, "error when converting to JSON");
             }
 
@@ -2168,7 +2168,7 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
                     cJSON* pos = dets, *rad = NULL;
                     rad = FIND_JSON_OBJ("R", "Optode.Detector.R", det);
 
-                    if (cJSON_GetArraySize(det) == 2) {
+                    if (cJSON_IsObject(det)) { /* {"Pos":[..],"R":r,"Dir":[..]}; may carry more than 2 fields */
                         pos = FIND_JSON_OBJ("Pos", "Optode.Detector.Pos", det);
                     }
 
@@ -4363,7 +4363,7 @@ void mcx_printheader(mcconfig* cfg) {
     MMC_FPRINTF(cfg->flog, S_YELLOW "\
 ###############################################################################\n\
 #                     Mesh-based Monte Carlo (MMC) - OpenCL                   #\n\
-#          Copyright (c) 2010-2025 Qianqian Fang <q.fang at neu.edu>          #\n\
+#          Copyright (c) 2010-2026 Qianqian Fang <q.fang at neu.edu>          #\n\
 #" S_BLUE "              https://mcx.space/#mmc  &  https://neurojson.io                " S_YELLOW "#\n\
 #                                                                             #\n\
 #Computational Optics & Translational Imaging (COTI) Lab  [http://fanglab.org]#\n\
