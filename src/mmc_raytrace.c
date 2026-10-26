@@ -408,7 +408,7 @@ float plucker_raytet(ray* r, raytracer* tracer, mcconfig* cfg, visitor* visit) {
                 tshift = MIN( ((int)((r->photontimer - cfg->tstart) * visit->rtstep)), cfg->maxgate - 1 ) * tracer->mesh->ne;
             }
 
-            if (cfg->mcmethod == mmMCX) {
+            if (cfg->mcmethod == mmMCX && tracer->mesh->type[eid] > 0) { /* no fluence in non-tissue (label<=0) elements, as mcx never deposits in label-0 voxels */
                 if (cfg->srctype != stPattern || cfg->srcnum == 1) {
                     #pragma omp atomic
                     tracer->mesh->weight[eid + tshift] += ww;
@@ -461,7 +461,7 @@ float plucker_raytet(ray* r, raytracer* tracer, mcconfig* cfg, visitor* visit) {
                         }
                     }
 
-                    if (cfg->mcmethod == mmMCX) {
+                    if (cfg->mcmethod == mmMCX && tracer->mesh->type[eid] > 0) {
                         if (cfg->srctype != stPattern || cfg->srcnum == 1) {
                             for (i = 0; i < 4; i++) {
                                 #pragma omp atomic
@@ -746,7 +746,7 @@ float havel_raytet(ray* r, raytracer* tracer, mcconfig* cfg, visitor* visit) {
 
             //if(cfg->debuglevel&dlBary)
             //    MMC_FPRINTF(cfg->flog,"new bary0=[%f %f %f %f]\n",r->bary0.x,r->bary0.y,r->bary0.z,r->bary0.w);
-            if (cfg->mcmethod == mmMCX) {
+            if (cfg->mcmethod == mmMCX && tracer->mesh->type[eid] > 0) {
                 if (!cfg->basisorder) {
                     if (cfg->srctype != stPattern || cfg->srcnum == 1) {
                         #pragma omp atomic
@@ -932,7 +932,7 @@ float badouel_raytet(ray* r, raytracer* tracer, mcconfig* cfg, visitor* visit) {
             r->p0.y += r->Lmove * r->vec.y;
             r->p0.z += r->Lmove * r->vec.z;
 
-            if (cfg->mcmethod == mmMCX) {
+            if (cfg->mcmethod == mmMCX && tracer->mesh->type[eid] > 0) {
                 if (!cfg->basisorder) {
                     if (cfg->isatomic)
                         #pragma omp atomic
@@ -1576,7 +1576,7 @@ float branchless_badouel_raytet(ray* r, raytracer* tracer, mcconfig* cfg, visito
             T = _mm_add_ps(S, _mm_mul_ps(O, T));
             _mm_store_ps(&(r->p0.x), T);
 
-            if (cfg->mcmethod == mmMCX) {
+            if (cfg->mcmethod == mmMCX && tracer->mesh->type[eid] > 0) {
                 if (!cfg->basisorder) {
                     if (cfg->method == rtBLBadouel) {
                         unsigned int newidx = eid + tshift;
@@ -2059,7 +2059,7 @@ void onephoton(size_t id, raytracer* tracer, tetmesh* mesh, mcconfig* cfg,
         }
 
         mom = 0.f;
-        r.slen0 = mc_next_scatter(mesh->med[mesh->type[r.eid - 1]].g, &r.vec, ran, ran0, cfg, &mom);
+        r.slen0 = mc_next_scatter(mesh->med[(cfg->implicit && r.inroi) ? mesh->prop : mesh->type[r.eid - 1]].g, &r.vec, ran, ran0, cfg, &mom);
         r.slen = r.slen0;
 
         if (cfg->debuglevel & dlTraj) {
@@ -2688,13 +2688,17 @@ void albedoweight(ray* r, tetmesh* mesh, mcconfig* cfg, visitor* visit) {
     int* ee = (int*)(mesh->elem + eid * mesh->elemlen);
     int i, tshift, datalen = (cfg->method == rtBLBadouelGrid) ? cfg->crop0.z : ( (cfg->basisorder) ? mesh->nn : mesh->ne);;
 
-    medium* prop = mesh->med + (mesh->type[eid]);
+    medium* prop = mesh->med + ((cfg->implicit && r->inroi) ? mesh->prop : mesh->type[eid]);
     float ww = r->weight;
 
     r->weight *= prop->mus / (prop->mua + prop->mus);
 
     ww -= r->weight;
     r->Eabsorb += ww;
+
+    if (mesh->type[eid] <= 0) { /* no deposit in non-tissue (label<=0) elements */
+        return;
+    }
 
     tshift = MIN( ((int)((r->photontimer - cfg->tstart) * visit->rtstep)), cfg->maxgate - 1 ) * datalen;
 
