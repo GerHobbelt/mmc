@@ -546,8 +546,12 @@ extern "C" __global__ void __closesthit__ch() {
     // resolve some edge cases where hitlen is sligthly larger than slen
     const float lmove = min(hitlen, currprop.mus ? r.slen / currprop.mus : std::numeric_limits<float>::max());
 
-    // save output; for RF mode, also updates r.weight and r.weight_im inside
-    accumulateOutput(r, currprop, lmove);
+    // save output; for RF mode, also updates r.weight and r.weight_im inside.
+    // nothing is deposited in the ambient medium outside the mesh, e.g. the gap a
+    // wide-field source photon crosses from its launch plane to the tissue surface
+    if (r.mediumid != AMBIENT_MEDIUM_ID) {
+        accumulateOutput(r, currprop, lmove);
+    }
 
     // update photon position
     r.p0 += r.dir * (lmove + SAFETY_DISTANCE);
@@ -576,10 +580,12 @@ extern "C" __global__ void __closesthit__ch() {
             r.mediumid = isfronthit ? (media >> 16) : (media & 0xFFFF);
         }
 
-        // terminate if ray gets reflected or diffracted into ambient medium
-        if (r.mediumid == AMBIENT_MEDIUM_ID) {
-            r.mediumid = DEAD_MEDIUM_ID;
-        }
+    }
+
+    // terminate once a ray leaves the tissue for the ambient medium, also at a
+    // matched boundary or without -b 1, the same as the other tracers do on exit
+    if (r.mediumid == AMBIENT_MEDIUM_ID) {
+        r.mediumid = DEAD_MEDIUM_ID;
     }
 
     // update rng
@@ -606,6 +612,15 @@ extern "C" __global__ void __miss__ms() {
 
     // get medium properties
     const Medium currprop = gcfg.medium[r.mediumid];
+
+    // a ray that hits no triangle in a non-scattering medium (the void outside the
+    // mesh, mus=0) has left the domain for good: slen/mus is inf, and depositing
+    // that segment wrote NaN into the 8 corners of the output grid
+    if (currprop.mus == 0.f) {
+        r.mediumid = DEAD_MEDIUM_ID;
+        setRay(r);
+        return;
+    }
 
     // distance to the scattering event site
     float lmove = r.slen / currprop.mus;

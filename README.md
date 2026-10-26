@@ -74,6 +74,21 @@ this release also fixed a list of bugs, including
 
 The full changelog is listed below
 
+* 2026-10-21 [7a3b3f3] [optix] terminate rays that miss all triangles in a non-scattering medium, fix NaN grid corners
+* 2026-10-21 [db4d829] [perf] build the OpenCL kernel with -cl-unsafe-math-optimizations, 1.14-1.16x
+* 2026-10-21 [e803195] [perf] dynamic photon dispatch in the OpenCL/CUDA kernel, 1.02-1.06x
+* 2026-10-21 [3dca2b6] [doc] refresh the v2026 ChangeLog and README change lists
+* 2026-10-21 [ddb5953] [perf] schedule the SSE/OpenMP photon loop dynamically, 1.1-1.3x on 16 threads
+* 2026-10-21 [fa723e2] [doc] refresh the v2026 ChangeLog, NEWS and README change lists
+* 2026-10-21 [3329d2c] [pmmc] opt-in CUDA backend (-DBUILD_CUDA=ON), fix its device query, test opencl/cuda
+* 2026-10-21 [5e5b797] [build] link cudart into the Octave mex built by 'make cudaoct'
+* 2026-10-21 [9b7c135] [test] test the opencl, cuda and optix backends compiled into mmc in testmmc.sh
+* 2026-10-21 [8b2dfaf] [test] split the trajectory test mesh asymmetrically, regenerate the MMC goldens
+* 2026-10-21 [207c6f9] [optix] make the full OptiX debug pipeline opt-in (MMC_OPTIX_DEBUG) instead of !NDEBUG
+* 2026-10-21 [1475737] [test] compare trajectories per photon: 5e-2 mm tolerance, tolerate up to 10% forked photons
+* 2026-10-21 [ef2c28f] [bug] fix swapped sin/cos in OpenCL MCX_SINCOS with --optlevel 0, rebuild mmc_utils.o when mmc_core.cl changes
+* 2026-10-21 [e542dad] [release] set the v2026 (3.0.0) codename to Egg Tart
+* 2026-10-21 [64ffdff] [doc] refresh the v2026 ChangeLog, NEWS and README change lists
 * 2026-10-21 [de3d1cf] [bug] read a JSON detector object by key regardless of its field count
 * 2026-10-21 [eba3e97] [bug] emit valid JSON in the -D S/X/R debug log ("key":[..] instead of "key"=[..])
 * 2026-10-21 [91bc95b] [release] bump the remaining v2025.10 keyword strings to v2026
