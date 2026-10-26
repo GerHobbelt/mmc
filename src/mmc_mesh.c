@@ -243,6 +243,155 @@ void mesh_clear(tetmesh* mesh, mcconfig* cfg) {
         free(mesh->faceroi);
         mesh->faceroi = NULL;
     }
+
+    /* the OptiX triangle surface */
+    free(mesh->fnode);
+    free(mesh->fnorm);
+    free(mesh->face);
+    free(mesh->front);
+    free(mesh->back);
+    mesh->fnode = NULL;
+    mesh->fnorm = NULL;
+    mesh->face = NULL;
+    mesh->front = NULL;
+    mesh->back = NULL;
+    mesh->nface = 0;
+}
+
+/**
+ * @brief Per-medium chain-rule factors converting the adjoint J_D into J_mus or J_musp, as mcx does
+ *
+ * With D = 1/(3*(1-g)*mus): J_mus = J_D * 3*D^2*(1-g) = J_D / (3*(1-g)*mus^2) and
+ * J_musp = J_D * 3*D^2 = J_D / (3*(1-g)^2*mus^2). The GPU adjoint kernels multiply J_D by the
+ * factor of each element's label (mesh mode) or of the label recorded in each voxel during the
+ * simulation (grid mode); a medium with mus=0 or g=1 gets 0.
+ *
+ * @param[in] mesh: the mesh object
+ * @param[in] ismusp: 1 for J_musp, 0 for J_mus
+ * @return a malloc-ed table of prop+1 factors, indexed by the medium label
+ */
+
+float* mesh_getmusscale(tetmesh* mesh, int ismusp) {
+    float* scale = (float*)calloc(mesh->prop + 1, sizeof(float));
+
+    for (int i = 1; i <= mesh->prop; i++) {
+        float mus = mesh->med[i].mus, onemg = 1.f - mesh->med[i].g;
+
+        if (mus > 0.f && onemg > 0.f) {
+            scale[i] = ismusp ? 1.f / (3.f * onemg * onemg * mus * mus) : 1.f / (3.f * onemg * mus * mus);
+        }
+    }
+
+    return scale;
+}
+
+/**
+ * @brief Build the OptiX triangle surface from a surface-only mesh (Mesh.MeshSurf)
+ *
+ * Each row of cfg->surf holds the 3 node indices (1-based) of a triangle, the label of its
+ * inner (back) side and that of its outer (front) side, the same data that tracer_prep
+ * extracts from a tetrahedral mesh: the normal (v1-v0)x(v2-v0) points from the inner to the
+ * outer side, and labels <= 0 are the ambient medium. A surface that is not closed, i.e. an
+ * edge not shared by an even number of triangles, is reported as a warning.
+ *
+ * @param[in] mesh: the mesh object, with the nodes and media loaded
+ * @param[in] cfg: the simulation configuration structure
+ */
+
+void mesh_loadsurf(tetmesh* mesh, mcconfig* cfg) {
+    unsigned int i, j, nopen = 0;
+    FLOAT3 vec01, vec02, vnorm;
+
+    mesh->nface = cfg->surfnum;
+    mesh->fnode = (FLOAT3*)malloc(mesh->nn * sizeof(FLOAT3));
+    mesh->face = (uint3*)malloc(mesh->nface * sizeof(uint3));
+    mesh->fnorm = (FLOAT3*)malloc(mesh->nface * sizeof(FLOAT3));
+    mesh->front = (uint*)malloc(mesh->nface * sizeof(uint));
+    mesh->back = (uint*)malloc(mesh->nface * sizeof(uint));
+
+    for (i = 0; i < (unsigned int)mesh->nn; i++) {
+        mesh->fnode[i].x = mesh->node[i].x;
+        mesh->fnode[i].y = mesh->node[i].y;
+        mesh->fnode[i].z = mesh->node[i].z;
+    }
+
+    for (i = 0; i < mesh->nface; i++) {
+        int* row = cfg->surf + i * 5;
+        int inner = MAX(row[3], 0), outer = MAX(row[4], 0);
+
+        for (j = 0; j < 3; j++) {
+            if (row[j] < 1 || row[j] > mesh->nn) {
+                MESH_ERROR("Mesh.MeshSurf has a node index out of range");
+            }
+        }
+
+        if (inner > mesh->prop || outer > mesh->prop) {
+            MESH_ERROR("Mesh.MeshSurf has a label larger than the number of media");
+        }
+
+        if (inner == outer) {
+            MESH_ERROR("Mesh.MeshSurf has a triangle with the same inner and outer labels");
+        }
+
+        mesh->face[i].x = row[0] - 1;
+        mesh->face[i].y = row[1] - 1;
+        mesh->face[i].z = row[2] - 1;
+        mesh->back[i] = inner;
+        mesh->front[i] = outer;
+
+        vec_diff((float3*)(mesh->fnode + mesh->face[i].x), (float3*)(mesh->fnode + mesh->face[i].y), (float3*)&vec01);
+        vec_diff((float3*)(mesh->fnode + mesh->face[i].x), (float3*)(mesh->fnode + mesh->face[i].z), (float3*)&vec02);
+        vec_cross((float3*)&vec01, (float3*)&vec02, (float3*)&vnorm);
+        float mag = sqrtf(vec_dot((float3*)&vnorm, (float3*)&vnorm));
+
+        if (mag <= 0.f) {
+            MESH_ERROR("Mesh.MeshSurf has a degenerate (zero-area) triangle");
+        }
+
+        vec_mult((float3*)&vnorm, 1.f / mag, (float3*)&vnorm);
+        mesh->fnorm[i] = vnorm;
+    }
+
+    /* closedness check: count the triangles sharing each edge, with the edges sorted as
+       (min node, max node) pairs */
+    {
+        unsigned long long* edges = (unsigned long long*)malloc(sizeof(unsigned long long) * mesh->nface * 3);
+        const int pairs[3][2] = {{0, 1}, {1, 2}, {2, 0}};
+
+        for (i = 0; i < mesh->nface; i++) {
+            unsigned int v[3] = {mesh->face[i].x, mesh->face[i].y, mesh->face[i].z};
+
+            for (j = 0; j < 3; j++) {
+                unsigned long long a = v[pairs[j][0]], b = v[pairs[j][1]];
+                edges[i * 3 + j] = (a < b) ? ((a << 32) | b) : ((b << 32) | a);
+            }
+        }
+
+        qsort(edges, mesh->nface * 3, sizeof(unsigned long long), mesh_compareu64);
+
+        for (i = 0; i < mesh->nface * 3;) {
+            j = i;
+
+            while (j < mesh->nface * 3 && edges[j] == edges[i]) {
+                j++;
+            }
+
+            nopen += ((j - i) & 1);
+            i = j;
+        }
+
+        free(edges);
+    }
+
+    if (nopen) {
+        MMC_FPRINTF(cfg->flog, S_RED "WARNING: Mesh.MeshSurf is not closed, %u edges are not shared by an even number of triangles\n" S_RESET, nopen);
+    }
+}
+
+/** comparison of two unsigned 64-bit integers for qsort */
+int mesh_compareu64(const void* a, const void* b) {
+    unsigned long long x = *(const unsigned long long*)a, y = *(const unsigned long long*)b;
+    return (x > y) - (x < y);
 }
 
 
@@ -255,10 +404,21 @@ void mesh_clear(tetmesh* mesh, mcconfig* cfg) {
  */
 
 void mesh_init_from_cfg(tetmesh* mesh, mcconfig* cfg) {
+    int issurfonly = (cfg->surf && cfg->surfnum > 0 && cfg->elemnum == 0);
+
+    if (issurfonly && (cfg->compute != cbOptiX || cfg->method != rtBLBadouelGrid)) {
+        MESH_ERROR("a surface-only mesh (Mesh.MeshSurf without MeshElem) requires --compute optix and -M G (dual-grid output)");
+    }
+
     mesh_init(mesh);
     mesh_loadnode(mesh, cfg);
     mesh_loadelem(mesh, cfg);
     mesh_loadmedia(mesh, cfg);
+
+    if (issurfonly) {
+        cfg->e0 = -1;  /* no elements: the OptiX kernel finds the initial medium by tracing a ray */
+        mesh_loadsurf(mesh, cfg);
+    }
 
     if (cfg->isdumpjson == 1) {
         int i, j, *elem = NULL;
@@ -303,6 +463,10 @@ void mesh_init_from_cfg(tetmesh* mesh, mcconfig* cfg) {
         }
 
         exit(0);
+    }
+
+    if (issurfonly) {
+        return;  /* the element-based data below are not needed by the OptiX surface tracer */
     }
 
     if (cfg->basisorder == 2) {
@@ -1252,6 +1416,10 @@ void tracer_init(raytracer* tracer, tetmesh* pmesh, char methodid) {
 void tracer_prep(raytracer* tracer, mcconfig* cfg) {
     int i, j, k, ne = tracer->mesh->ne;
 
+    if (cfg->compute == cbOptiX && tracer->mesh->ne == 0 && tracer->mesh->nface > 0) {
+        return;  /* a surface-only mesh: the OptiX triangles come from Mesh.MeshSurf (mesh_loadsurf) */
+    }
+
     if (cfg->compute == cbOptiX) {
         tetmesh* pmesh = tracer->mesh;
         int* fnb = (int*)malloc(pmesh->ne * pmesh->elemlen * sizeof(int));
@@ -1282,7 +1450,12 @@ void tracer_prep(raytracer* tracer, mcconfig* cfg) {
             for (int j = 0; j < pmesh->elemlen; ++j) {
                 int nexteid = fnb[(i * pmesh->elemlen) + j];
 
-                if ((nexteid > 0 && pmesh->type[nexteid - 1] != pmesh->type[i]) || nexteid == 0) {
+                /* labels <= 0 (the void and the wide-field source/detector domains, -1/-2)
+                   are all the ambient medium 0 of the OptiX kernel; nexteid < 0 marks a face
+                   already added from the neighboring element */
+                int mytype = MAX(pmesh->type[i], 0), nexttype = (nexteid > 0) ? MAX(pmesh->type[nexteid - 1], 0) : 0;
+
+                if (nexteid >= 0 && nexttype != mytype) {
                     // face node
                     pmesh->face[pmesh->nface].x = pmesh->elem[(i * pmesh->elemlen) + out[ifaceorder[j]][0]] - 1;
                     pmesh->face[pmesh->nface].y = pmesh->elem[(i * pmesh->elemlen) + out[ifaceorder[j]][1]] - 1;
@@ -1298,8 +1471,8 @@ void tracer_prep(raytracer* tracer, mcconfig* cfg) {
                     vec_mult((float3*)&vnorm, mag, (float3*)&vnorm);
                     pmesh->fnorm[pmesh->nface] = vnorm;
                     // front and back media types
-                    pmesh->front[pmesh->nface] = ((nexteid == 0) ? 0 : pmesh->type[nexteid - 1]);
-                    pmesh->back[pmesh->nface] = pmesh->type[i];
+                    pmesh->front[pmesh->nface] = nexttype;
+                    pmesh->back[pmesh->nface] = mytype;
                     fnb[(i * pmesh->elemlen) + j] = -1;
 
                     if (nexteid > 0) {
@@ -1520,6 +1693,10 @@ void tracer_build(raytracer* tracer) {
 
     if (tracer->d || tracer->m || tracer->n || tracer->mesh == NULL) {
         return;
+    }
+
+    if (tracer->mesh->ne == 0 && tracer->mesh->nface > 0) {
+        return;  /* a surface-only mesh for OptiX has no elements to precompute */
     }
 
     if (tracer->mesh->node == NULL || tracer->mesh->elem == NULL ||
@@ -1750,6 +1927,7 @@ void mesh_saveweight(tetmesh* mesh, mcconfig* cfg, int isref) {
     if (isref) {
         data = mesh->dref;
         datalen = mesh->nf;
+        nslots = cfg->srcnum;  /* mesh->dref holds nf * maxgate values per source */
     }
 
     if (cfg->rootpath[0]) {
@@ -1767,7 +1945,7 @@ void mesh_saveweight(tetmesh* mesh, mcconfig* cfg, int isref) {
             cfg->dim.z = datalen;
         }
 
-        mcx_savedata(mesh->weight, (size_t)datalen * cfg->maxgate * nslots, cfg, isref);
+        mcx_savedata(data, (size_t)datalen * cfg->maxgate * nslots, cfg, isref);  /* the surface reflectance if isref */
         cfg->dim = dim0;
         return;
     }
@@ -1980,6 +2158,8 @@ void mesh_savejacob(mcconfig* cfg, tetmesh* mesh, float* jac, int Ns, int Nd, in
         }
     }
 }
+
+
 
 /**
  * @brief Save detected photon data into an .mch history file
@@ -2365,6 +2545,33 @@ void mesh_validate(tetmesh* mesh, mcconfig* cfg) {
 
     if (mesh->prop == 0) {
         MMC_ERROR(999, "you must define the 'prop' field in the input structure");
+    }
+
+    /* a surface-only mesh for OptiX (cfg.face with 5 columns, no cfg.elem) */
+    if (mesh->ne == 0 && cfg->surf && cfg->surfnum > 0) {
+        if (cfg->compute != cbOptiX || cfg->method != rtBLBadouelGrid) {
+            MMC_ERROR(999, "a surface-only mesh ('face' with 5 columns, no 'elem') requires cfg.compute='optix' and cfg.method='grid'");
+        }
+
+        if (mesh->node == NULL || mesh->nn == 0) {
+            MMC_ERROR(999, "a surface-only mesh needs the 'node' field");
+        }
+
+        free(mesh->weight);
+        mesh_createdualmesh(mesh, cfg);
+        cfg->basisorder = 0;
+        mesh->weight = (double*)calloc(sizeof(double) * cfg->crop0.z * cfg->srcnum, cfg->maxgate);
+
+        if (cfg->unitinmm != 1.f) {
+            for (i = 1; i <= mesh->prop; i++) {
+                mesh->med[i].mus *= cfg->unitinmm;
+                mesh->med[i].mua *= cfg->unitinmm;
+            }
+        }
+
+        cfg->e0 = -1;  /* the OptiX kernel finds the initial medium by tracing a ray */
+        mesh_loadsurf(mesh, cfg);
+        return;
     }
 
     if (mesh->nn == 0 || mesh->ne == 0 || mesh->evol == NULL || mesh->facenb == NULL) {

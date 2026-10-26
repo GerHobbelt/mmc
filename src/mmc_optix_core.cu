@@ -352,12 +352,13 @@ __device__ __forceinline__ void accumulateOutput(optixray& r, const Medium& prop
     float w_re = r.weight, w_im = r.weight_im;
 
     if (isrf) {
-        // complex Beer-Lambert per segment: w_new = w * segdecay * exp(i*phase)
+        // complex Beer-Lambert per segment: w_new = w * segdecay * exp(-i*phase), the sign
+        // that the deposit (w0-w)/(mua + i*omega*n/c0) below and the OpenCL/CUDA kernels use
         float a_im = gcfg.omega * prop.n * gcfg.oneoverc0;
         float a_mag2 = prop.mua * prop.mua + a_im * a_im;
         // new weight after one segment
-        float new_re = segdecay * (w_re * rfcos - w_im * rfsin);
-        float new_im = segdecay * (w_re * rfsin + w_im * rfcos);
+        float new_re = segdecay * (w_re * rfcos + w_im * rfsin);
+        float new_im = segdecay * (w_im * rfcos - w_re * rfsin);
         float dw_re = w_re - new_re;
         float dw_im = w_im - new_im;
         segloss    = (a_mag2 > 0.f) ? (dw_re * prop.mua + dw_im * a_im) / a_mag2 : 0.f;
@@ -383,8 +384,8 @@ __device__ __forceinline__ void accumulateOutput(optixray& r, const Medium& prop
     // iterate over the rest of the segments
     for (int i = 1; i < segcount; ++i) {
         if (isrf) {
-            float new_re2 = segdecay * (w_re * rfcos - w_im * rfsin);
-            float new_im2 = segdecay * (w_re * rfsin + w_im * rfcos);
+            float new_re2 = segdecay * (w_re * rfcos + w_im * rfsin);
+            float new_im2 = segdecay * (w_im * rfcos - w_re * rfsin);
             float dw_re2 = w_re - new_re2;
             float dw_im2 = w_im - new_im2;
             float a_im = gcfg.omega * prop.n * gcfg.oneoverc0;
@@ -477,6 +478,39 @@ __device__ __forceinline__ bool reflectray(const float3& norm, const float& n1,
 }
 
 /**
+ * @brief Add a photon weight to a float accumulator pair with the MCX dual single-precision
+ * buffer: once the primary sum exceeds MAX_ACCUM, it is moved to the secondary one
+ */
+__device__ __forceinline__ void accumEnergy(float& acc, float& acc2, const float& w) {
+    acc += w;
+
+    if (acc > MAX_ACCUM) {
+        acc2 += acc;
+        acc = 0.f;
+    }
+}
+
+/**
+ * @brief Add a thread's energy sums to the 4 floats after the output grids (2 or, for RF,
+ * 4 blocks of crop0.w): [tot, esc] and their secondary sums at [2, 3], using the same
+ * dual single-precision buffer as saveToBuffer
+ */
+__device__ __forceinline__ void saveEnergy(const int& idx, const float& acc, const float& acc2) {
+    float* buf = (float*)gcfg.outputbuffer + gcfg.crop0.w * ((gcfg.omega != 0.f) ? 4 : 2);
+    float accum = atomicAdd(buf + idx, acc);
+
+    if (accum > MAX_ACCUM) {
+        if (atomicAdd(buf + idx, -accum) < 0.0f) {
+            atomicAdd(buf + idx, accum);
+        } else {
+            atomicAdd(buf + idx + 2, accum);
+        }
+    }
+
+    atomicAdd(buf + idx + 2, acc2);
+}
+
+/**
  * @brief Launch photon and trace ray iteratively
  */
 extern "C" __global__ void __raygen__rg() {
@@ -486,23 +520,45 @@ extern "C" __global__ void __raygen__rg() {
     mcx::Random rng;
     initRNGSeed(rng, launchindex.x);
 
+    // number of photons of this thread; a thread without photons must not launch one,
+    // which would also count its weight in the launched energy
+    const int nphoton = gcfg.threadphoton + (launchindex.x < gcfg.oddphoton);
+
+    if (nphoton == 0) {
+        return;
+    }
+
     // init a ray
     optixray r;
     launchPhoton(r, rng);
 
     int ndone = 0;  // number of simulated photons
 
-    while (ndone < (gcfg.threadphoton + (launchindex.x < gcfg.oddphoton))) {
+    /* launched and escaped energy of this thread, as the other backends tally them: the
+       weight a photon still carries when it ends (escape or time limit) has escaped;
+       |w| for RF, which the phase rotation leaves unchanged */
+    float energytot = 0.f, energytot2 = 0.f, energyesc = 0.f, energyesc2 = 0.f;
+    accumEnergy(energytot, energytot2, r.weight);
+
+    while (ndone < nphoton) {
         if (r.mediumid != DEAD_MEDIUM_ID) {
             movePhoton(r, rng);
         }
 
         // when a photon escapes or tof reaches the upper limit
         if (!(r.mediumid != DEAD_MEDIUM_ID && r.photontimer < gcfg.tend)) {
-            launchPhoton(r, rng);
+            accumEnergy(energyesc, energyesc2, (gcfg.omega != 0.f) ? sqrtf(r.weight * r.weight + r.weight_im * r.weight_im) : r.weight);
             ++ndone;
+
+            if (ndone < nphoton) {
+                launchPhoton(r, rng);
+                accumEnergy(energytot, energytot2, r.weight);
+            }
         }
     }
+
+    saveEnergy(0, energytot, energytot2);
+    saveEnergy(1, energyesc, energyesc2);
 }
 
 /**

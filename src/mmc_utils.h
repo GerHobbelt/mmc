@@ -224,7 +224,7 @@ typedef struct MMC_config {
     float tstart;                  /**<start time in second*/
     float tstep;                   /**<time step in second*/
     float tend;                    /**<end time in second*/
-    float3 steps;               /**<voxel sizes along x/y/z in mm*/
+    FLOAT3 steps;                  /**<voxel sizes along x/y/z in mm; FLOAT3 (not float3, which is 16 bytes in the SSE/OpenCL C units but 12 in the CUDA units) keeps one mcconfig layout across all units*/
     uint3 dim;                     /**<dim.x is the initial element number in MMC, dim.y is faceid*/
     uint4 crop0;                   /**<sub-volume for cache*/
     uint4 crop1;                   /**<the other end of the caching box*/
@@ -289,7 +289,7 @@ typedef struct MMC_config {
     char deviceid[MAX_DEVICE];
     float workload[MAX_DEVICE];
     char compileropt[MAX_PATH_LENGTH];
-    char kernelfile[MAX_SESSION_LENGTH];
+    char kernelfile[MAX_PATH_LENGTH];
     char* clsource;
     int parentid;
     int optlevel;
@@ -339,6 +339,9 @@ typedef struct MMC_config {
     int* elem;                     /**<tetrahedron node indices from json input*/
     unsigned int elemnum;          /**<total number of elem*/
     unsigned int elemlen;          /**<number of nodes per elem*/
+    int* surf;                     /**<surface triangles from json input (Mesh.MeshSurf), 5 columns: 3 node
+                                        indices (1-based), inner label, outer label; OptiX only*/
+    unsigned int surfnum;          /**<total number of surface triangles*/
     enum TROIType roitype;         /**<mesh roi type: rtNone: unknown, rtEdge: edge-roi, rtNode: node-roi, rtFace: face-roi */
     float* roidata;                /**<mesh roi (edge/node/face) data*/
     char jsonfile[MAX_PATH_LENGTH];/**<if the seed is specified as a file (mch), mcx will replay the photons*/

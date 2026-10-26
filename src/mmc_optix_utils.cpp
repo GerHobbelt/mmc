@@ -95,6 +95,19 @@ void optix_run_simulation(mcconfig* cfg, tetmesh* mesh, raytracer* tracer, GPUIn
     MMC_FPRINTF(cfg->flog, "transfer complete:        %d ms\n", GetTimeMillis() - tic0);
     fflush(cfg->flog);
 
+    /* the launched and escaped energy sums follow the output grids, see saveEnergy */
+    float* energybuf = optixcfg.outputHostBuffer + optixcfg.outputBufferSize - 4;
+    double energy[2] = {(double)energybuf[0] + energybuf[2], (double)energybuf[1] + energybuf[3]};
+
+    if (cfg->energytot && cfg->energyesc) {
+        cfg->energytot[0] += energy[0];
+        cfg->energyesc[0] += energy[1];
+    }
+
+    MMC_FPRINTF(cfg->flog, "total simulated energy: %.2f\tabsorbed: %5.5f%%\n(loss due to initial specular reflection is excluded in the total)\n",
+                energy[0], (energy[0] > 0.0) ? (energy[0] - energy[1]) / energy[0] * 100.f : 0.f);
+    fflush(cfg->flog);
+
     int isrfforward_o = (cfg->omega > 0.f && cfg->seed != SEED_FROM_FILE);
     size_t fieldlen_o = optixcfg.launchParams.crop0.w;
 
@@ -125,11 +138,9 @@ void optix_run_simulation(mcconfig* cfg, tetmesh* mesh, raytracer* tracer, GPUIn
         MMC_FPRINTF(cfg->flog, "normalizing raw data ...\t");
         fflush(cfg->flog);
 
-        // not used if cfg->method == rtBLBadouelGrid
-        // for now assume initial weight of each photon is 1.0
-        float energyabs = 0.0f, energytot = cfg->nphoton;
-
-        mesh_normalize(mesh, cfg, energyabs, energytot, 0);
+        double normalizer = mesh_normalize(mesh, cfg, energy[0] - energy[1], energy[0], 0);
+        MMCDEBUG(cfg, dlTime, (cfg->flog, "source %d\ttotal simulated energy: %f\tabsorbed: " S_BOLD "" S_BLUE "%5.5f%%" S_RESET "\tnormalizor=%g\n",
+                               1, energy[0], (energy[0] > 0.0) ? 100.f * (energy[0] - energy[1]) / energy[0] : 0.f, normalizer));
         MMC_FPRINTF(cfg->flog, "normalization complete:    %d ms\n",
                     GetTimeMillis() - tic0);
         fflush(cfg->flog);
@@ -168,6 +179,58 @@ void prepLaunchParams(mcconfig* cfg, tetmesh* mesh, GPUInfo* gpu,
                       OptixParams* optixcfg) {
     if (cfg->method != rtBLBadouelGrid) {
         mcx_error(-1, "Optix MMC only supports dual grid mode", __FILE__, __LINE__);
+    }
+
+    /* reject the features that the OptiX kernel does not implement, rather than
+       returning silently wrong outputs */
+    if (MCX_IS_ADJOINT_TYPE(cfg->outputtype)) {
+        mcx_error(-1, "Optix MMC does not support the adjoint Jacobian outputs (-O A/D/U/V/W/Q); use --compute cuda or opencl", __FILE__, __LINE__);
+    }
+
+    if (cfg->seed == SEED_FROM_FILE || cfg->outputtype == otJacobian || cfg->outputtype == otWL ||
+            cfg->outputtype == otWP || cfg->outputtype == otRFmus) {
+        mcx_error(-1, "Optix MMC does not support photon replay or the replay outputs (-O J/L/P); use --compute cuda or opencl", __FILE__, __LINE__);
+    }
+
+    if (cfg->extrasrclen > 0) {
+        mcx_error(-1, "Optix MMC does not support multiple sources; use --compute cuda or opencl", __FILE__, __LINE__);
+    }
+
+    switch (cfg->srctype) {
+        case stPencil:
+        case stIsotropic:
+        case stCone:
+        case stGaussian:
+        case stPlanar:
+        case stArcSin:
+        case stDisk:
+        case stZGaussian:
+        case stLine:
+        case stSlit:
+            break;
+
+        default:
+            mcx_error(-1, "Optix MMC does not support this source type (pattern, fourier, fourierx, fourierx2d, pencilarray, pattern3d, hyperboloid, ring); use --compute cuda or opencl", __FILE__, __LINE__);
+    }
+
+    if (cfg->issavedet && cfg->detnum > 0) {
+        mcx_error(-1, "Optix MMC does not save detected photons (-d 1); use --compute cuda or opencl, or set -d 0", __FILE__, __LINE__);
+    }
+
+    if (cfg->issaveref) {
+        mcx_error(-1, "Optix MMC does not save the surface reflectance (-X 1); use --compute cuda or opencl", __FILE__, __LINE__);
+    }
+
+    if (cfg->debuglevel & dlTraj) {
+        mcx_error(-1, "Optix MMC does not save photon trajectories (-D M); use --compute cuda or opencl", __FILE__, __LINE__);
+    }
+
+    if (cfg->mcmethod == mmMCML) {
+        mcx_error(-1, "Optix MMC only supports the MCX (micro-Beer-Lambert) method, not -m 1", __FILE__, __LINE__);
+    }
+
+    if (cfg->isnodalmua || cfg->isnodalmusp) {
+        mcx_error(-1, "Optix MMC does not support per-node optical properties (nodemua/nodemusp)", __FILE__, __LINE__);
     }
 
     int timeSteps = (int)((cfg->tend - cfg->tstart) / cfg->tstep + 0.5);
@@ -216,7 +279,7 @@ void prepLaunchParams(mcconfig* cfg, tetmesh* mesh, GPUInfo* gpu,
                                    cfg->crop0.y,
                                    cfg->crop0.z,
                                    cfg->crop0.z * timeSteps);
-    optixcfg->launchParams.dstep = 1.0f / cfg->unitinmm;
+    optixcfg->launchParams.dstep = 1.0f / cfg->steps.x;  /* the dual grid voxel size (--gridsize), not unitinmm */
 
     // time-gate settings
     optixcfg->launchParams.tstart = cfg->tstart;
@@ -228,7 +291,7 @@ void prepLaunchParams(mcconfig* cfg, tetmesh* mesh, GPUInfo* gpu,
     if (cfg->e0 == -1) {
         optixcfg->launchParams.mediumid0 = INITIAL_MEDIUM_UNKNOWN;
     } else {
-        optixcfg->launchParams.mediumid0 = mesh->type[cfg->e0 - 1];
+        optixcfg->launchParams.mediumid0 = MAX(mesh->type[cfg->e0 - 1], 0);  /* labels <= 0: the ambient medium */
     }
 
     // simulation flags
@@ -263,7 +326,7 @@ void prepLaunchParams(mcconfig* cfg, tetmesh* mesh, GPUInfo* gpu,
 
     // output buffer (single precision); 4x for RF (re1, re2, im1, im2)
     int isrfforward = (cfg->omega > 0.f && cfg->seed != SEED_FROM_FILE);
-    optixcfg->outputBufferSize = optixcfg->launchParams.crop0.w * (isrfforward ? 4 : 2);
+    optixcfg->outputBufferSize = optixcfg->launchParams.crop0.w * (isrfforward ? 4 : 2) + 4;  /* + the energy sums */
     optixcfg->outputHostBuffer = (float*)calloc(optixcfg->outputBufferSize, sizeof(float));
     optixcfg->outputBuffer.alloc_and_upload(optixcfg->outputHostBuffer,
                                             optixcfg->outputBufferSize);
@@ -702,7 +765,7 @@ void buildSBT(tetmesh* mesh, OptixParams* optixcfg) {
     float4* fnorm = (float4*)calloc(mesh->nface, sizeof(float4));
 
     for (size_t i = 0; i < mesh->nface; ++i) {
-        uint media = (mesh->front[i] << 16) | (0xFF & mesh->back[i]);
+        uint media = (mesh->front[i] << 16) | (0xFFFF & mesh->back[i]);  /* the kernel reads 16 bits each */
         fnorm[i] = make_float4(mesh->fnorm[i].x, mesh->fnorm[i].y, mesh->fnorm[i].z,
                                *(float*)&media);
     }
