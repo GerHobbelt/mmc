@@ -28,6 +28,22 @@ extern "C" {
 }
 
 /**
+ * @brief Cross product of two vectors
+ */
+__device__ __forceinline__ float3 crossVec(const float3& a, const float3& b) {
+    return make_float3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x);
+}
+
+/**
+ * @brief Normalize a vector
+ */
+__device__ __forceinline__ float3 unitVec(const float3& v) {
+    return v * rsqrtf(dot(v, v));
+}
+
+__device__ __forceinline__ float3 rotateVector(const float3& vec, const float2& zen, const float2& azi);
+
+/**
  * @brief Init RNG seed for each thread
  */
 __device__ __forceinline__ void initRNGSeed(mcx::Random& rng, const int& idx) {
@@ -58,12 +74,17 @@ __device__ __forceinline__ void launchPhoton(optixray& r, mcx::Random& rng) {
     r.weight = 1.0f;
     r.weight_im = 0.0f;  /**< initialize imaginary weight to zero */
 
-    /* multi-source mode: randomly select source from gcfgsrc[] */
-    if (gcfg.srcid < 0 && gcfg.extrasrclen > 0) {
-        int srcslot = (int)(rng.uniform(0.0f, 1.0f) * gcfg.extrasrclen);
+    /* multi-source mode, as in the OpenCL/CUDA kernel: srcid < 0 picks a source slot at
+       random for each photon, whose deposits go to the field of that slot; srcid > 0
+       launches all photons from slot srcid-1 into a single field */
+    if (gcfg.extrasrclen > 0 && (gcfg.srcid < 0 || (gcfg.srcid > 0 && gcfg.srcid <= gcfg.extrasrclen))) {
+        int srcslot;
 
-        if (srcslot >= gcfg.extrasrclen) {
-            srcslot = gcfg.extrasrclen - 1;
+        if (gcfg.srcid < 0) {
+            srcslot = min((int)(rng.uniform(0.0f, 1.0f) * gcfg.extrasrclen), gcfg.extrasrclen - 1);
+            ((uint*)gcfg.slotbuffer)[optixGetLaunchIndex().x] = srcslot;
+        } else {
+            srcslot = gcfg.srcid - 1;
         }
 
         ExtraSrc src = ((ExtraSrc*)gcfg.srcdatabuffer)[srcslot];
@@ -107,7 +128,9 @@ __device__ __forceinline__ void launchPhoton(optixray& r, mcx::Random& rng) {
 
         r.slen = rng.rand_next_scatlen();
         r.photontimer = 0.0f;
-        r.mediumid = gcfg.mediumid0;
+
+        /* the host stores the medium enclosing each source in srcparam2.w, < 0 if unknown */
+        r.mediumid = (src.srcparam2.w >= 0.f) ? (unsigned int)src.srcparam2.w : INITIAL_MEDIUM_UNKNOWN;
 
         if (r.mediumid == INITIAL_MEDIUM_UNKNOWN) {
             getInitialMediumId(r, rng);
@@ -116,23 +139,81 @@ __device__ __forceinline__ void launchPhoton(optixray& r, mcx::Random& rng) {
         return;
     }
 
-    if (gcfg.srctype == MCX_SRC_PLANAR) {
+    float3 origin = r.p0;  /* the focal reference point of a wide-field source */
+    bool canfocus = true;
+    uint posidx = 0;       /* the pattern pixel of the photon, used when srcnum > 1 */
+
+    if (gcfg.srctype == MCX_SRC_PLANAR || gcfg.srctype == MCX_SRC_PATTERN || gcfg.srctype == MCX_SRC_FOURIER
+            || gcfg.srctype == MCX_SRC_PENCILARRAY || gcfg.srctype == MCX_SRC_PATTERN3D) {
         float rx = rng.uniform(0.0f, 1.0f);
         float ry = rng.uniform(0.0f, 1.0f);
-        r.p0.x = gcfg.srcpos.x + rx * gcfg.srcparam1.x + ry * gcfg.srcparam2.x;
-        r.p0.y = gcfg.srcpos.y + rx * gcfg.srcparam1.y + ry * gcfg.srcparam2.y;
-        r.p0.z = gcfg.srcpos.z + rx * gcfg.srcparam1.z + ry * gcfg.srcparam2.z;
-    } else if (gcfg.srctype == MCX_SRC_DISK || gcfg.srctype == MCX_SRC_GAUSSIAN) {
-        float sphi, cphi;
-        float phi = TWO_PI * rng.uniform(0.0f, 1.0f);
+
+        if (gcfg.srctype == MCX_SRC_PATTERN3D) {
+            float rz = rng.uniform(0.0f, 1.0f);
+            int nx = (int)gcfg.srcparam1.x, ny = (int)gcfg.srcparam1.y, nz = (int)gcfg.srcparam1.z;
+            r.p0 = gcfg.srcpos + make_float3(rx * gcfg.srcparam1.x, ry * gcfg.srcparam1.y, rz * gcfg.srcparam1.z);
+            posidx = min((int)(rz * nz), nz - 1) * ny * nx + min((int)(ry * ny), ny - 1) * nx + min((int)(rx * nx), nx - 1);
+            r.weight = (gcfg.srcnum > 1) ? 1.f : ((float*)gcfg.srcpattern)[posidx];
+            origin += 0.5f * make_float3(gcfg.srcparam1.x, gcfg.srcparam1.y, gcfg.srcparam1.z);
+        } else {
+            float3 v1 = make_float3(gcfg.srcparam1.x, gcfg.srcparam1.y, gcfg.srcparam1.z);
+            float3 v2 = make_float3(gcfg.srcparam2.x, gcfg.srcparam2.y, gcfg.srcparam2.z);
+
+            if (gcfg.srctype == MCX_SRC_PENCILARRAY) {
+                r.p0 = gcfg.srcpos + floorf(rx * gcfg.srcparam1.w) / (gcfg.srcparam1.w - 1.f) * v1
+                       + floorf(ry * gcfg.srcparam2.w) / (gcfg.srcparam2.w - 1.f) * v2;
+            } else {
+                r.p0 = gcfg.srcpos + rx * v1 + ry * v2;
+            }
+
+            if (gcfg.srctype == MCX_SRC_PATTERN) {
+                int xsize = (int)gcfg.srcparam1.w, ysize = (int)gcfg.srcparam2.w;
+                posidx = min((int)(ry * ysize), ysize - 1) * xsize + min((int)(rx * xsize), xsize - 1);
+                r.weight = (gcfg.srcnum > 1) ? 1.f : ((float*)gcfg.srcpattern)[posidx];
+            } else if (gcfg.srctype == MCX_SRC_FOURIER) {
+                r.weight = (cosf((floorf(gcfg.srcparam1.w) * rx + floorf(gcfg.srcparam2.w) * ry + gcfg.srcparam1.w - floorf(gcfg.srcparam1.w)) * TWO_PI)
+                            * (1.f - gcfg.srcparam2.w + floorf(gcfg.srcparam2.w)) + 1.f) * 0.5f;
+            }
+
+            origin += 0.5f * (v1 + v2);
+        }
+    } else if (gcfg.srctype == MCX_SRC_FOURIERX || gcfg.srctype == MCX_SRC_FOURIERX2D) {
+        /* srcparam1: [v1, |v2|], v2 = |v2| * unit(srcdir x v1); srcparam2: [kx, ky, phi0, M] or [kx, ky, phix, phiy] */
+        float rx = rng.uniform(0.0f, 1.0f);
+        float ry = rng.uniform(0.0f, 1.0f);
+        float3 v1 = make_float3(gcfg.srcparam1.x, gcfg.srcparam1.y, gcfg.srcparam1.z);
+        float3 v2 = gcfg.srcparam1.w * rsqrtf(dot(v1, v1)) * crossVec(gcfg.srcdir, v1);
+        r.p0 = gcfg.srcpos + rx * v1 + ry * v2;
+
+        if (gcfg.srctype == MCX_SRC_FOURIERX2D) {
+            r.weight = (sinf((gcfg.srcparam2.x * rx + gcfg.srcparam2.z) * TWO_PI) * sinf((gcfg.srcparam2.y * ry + gcfg.srcparam2.w) * TWO_PI) + 1.f) * 0.5f;
+        } else {
+            r.weight = (cosf((gcfg.srcparam2.x * rx + gcfg.srcparam2.y * ry + gcfg.srcparam2.z) * TWO_PI) * (1.f - gcfg.srcparam2.w) + 1.f) * 0.5f;
+        }
+
+        origin += 0.5f * (v1 + v2);
+    } else if (gcfg.srctype == MCX_SRC_DISK || gcfg.srctype == MCX_SRC_RING || gcfg.srctype == MCX_SRC_GAUSSIAN) {
+        float sphi, cphi, phi;
+
+        if (gcfg.srctype == MCX_SRC_RING && (gcfg.srcparam1.z > 0.f || gcfg.srcparam1.w > 0.f)) {
+            phi = fabsf(gcfg.srcparam1.z - gcfg.srcparam1.w) * rng.uniform(0.0f, 1.0f) + fminf(gcfg.srcparam1.z, gcfg.srcparam1.w);
+        } else {
+            phi = TWO_PI * rng.uniform(0.0f, 1.0f);
+        }
+
         sincosf(phi, &sphi, &cphi);
 
         float r0;
 
-        if (gcfg.srctype == MCX_SRC_DISK) {
-            r0 = sqrtf(rng.uniform(0.0f, 1.0f)) * gcfg.srcparam1.x;
-        } else {
+        if (gcfg.srctype != MCX_SRC_GAUSSIAN) {
+            /* a disk of radius srcparam1.x, or a ring between the radii srcparam1.x and srcparam1.y */
+            r0 = sqrtf(rng.uniform(0.0f, 1.0f) * fabsf(gcfg.srcparam1.x * gcfg.srcparam1.x - gcfg.srcparam1.y * gcfg.srcparam1.y)
+                       + gcfg.srcparam1.y * gcfg.srcparam1.y);
+        } else if (fabsf(gcfg.focus) < 1e-5f || fabsf(gcfg.srcparam1.y) < 1e-5f) {
             r0 = sqrtf(-logf((rng.uniform(0.0f, 1.0f)))) * gcfg.srcparam1.x;
+        } else {
+            float z0 = gcfg.srcparam1.x * gcfg.srcparam1.x * M_PIf / gcfg.srcparam1.y; //Rayleigh range
+            r0 = sqrtf(-logf(rng.uniform(0.0f, 1.0f)) * (1.f + (gcfg.focus * gcfg.focus / (z0 * z0)))) * gcfg.srcparam1.x;
         }
 
         if (gcfg.srcdir.z > -1.f + EPS && gcfg.srcdir.z < 1.f - EPS) {
@@ -166,7 +247,7 @@ __device__ __forceinline__ void launchPhoton(optixray& r, mcx::Random& rng) {
         r.dir.x = stheta * cphi;
         r.dir.y = stheta * sphi;
         r.dir.z = ctheta;
-        //canfocus = 0;
+        canfocus = false;
     }  else if (gcfg.srctype == MCX_SRC_ZGAUSSIAN) {
         float ang, stheta, ctheta, sphi, cphi;
         ang = TWO_PI * rng.uniform(0.0f, 1.0f); //next arimuth angle
@@ -176,7 +257,40 @@ __device__ __forceinline__ void launchPhoton(optixray& r, mcx::Random& rng) {
         r.dir.x = stheta * cphi;
         r.dir.y = stheta * sphi;
         r.dir.z = ctheta;
-        //canfocus = 0;
+        canfocus = false;
+    } else if (gcfg.srctype == MCX_SRC_HYPERBOLOID) {
+        /* a hyperboloid Gaussian beam: srcparam1.x is the waist radius, srcparam1.y the
+           distance from srcpos to the waist and srcparam1.z the Rayleigh range */
+        float sphi, cphi;
+        sincosf(TWO_PI * rng.uniform(0.0f, 1.0f), &sphi, &cphi);
+        float r0 = sqrtf(0.5f * rng.rand_next_scatlen()) * gcfg.srcparam1.x;
+
+        /* position offset and direction in the beam frame */
+        float tilt = (gcfg.srcparam1.z > 0.f) ? (-gcfg.srcparam1.y / gcfg.srcparam1.z) : 0.f;
+        float3 bdir = unitVec(make_float3(-r0 * sphi, r0 * cphi, gcfg.srcparam1.z));
+        float dp_x = r0 * (cphi - tilt * sphi);
+        float dp_y = r0 * (sphi + tilt * cphi);
+
+        /* rotate them to the srcdir frame */
+        if (gcfg.srcdir.z > -1.f + EPS && gcfg.srcdir.z < 1.f - EPS) {
+            float sin_theta = sqrtf(1.f - gcfg.srcdir.z * gcfg.srcdir.z);
+            float cphi_beam = gcfg.srcdir.x / sin_theta;
+            float sphi_beam = gcfg.srcdir.y / sin_theta;
+
+            r.p0.x = gcfg.srcpos.x + dp_x * cphi_beam * gcfg.srcdir.z - dp_y * sphi_beam;
+            r.p0.y = gcfg.srcpos.y + dp_x * sphi_beam * gcfg.srcdir.z + dp_y * cphi_beam;
+            r.p0.z = gcfg.srcpos.z - dp_x * sin_theta;
+
+            r.dir.x = bdir.x * cphi_beam * gcfg.srcdir.z - bdir.y * sphi_beam + bdir.z * cphi_beam * sin_theta;
+            r.dir.y = bdir.x * sphi_beam * gcfg.srcdir.z + bdir.y * cphi_beam + bdir.z * sphi_beam * sin_theta;
+            r.dir.z = -bdir.x * sin_theta + bdir.z * gcfg.srcdir.z;
+        } else {
+            r.p0 = gcfg.srcpos + make_float3(dp_x, dp_y, 0.f);
+            r.dir = make_float3(bdir.x, bdir.y, (gcfg.srcdir.z > 0.f) ? bdir.z : -bdir.z);
+        }
+
+        r.dir = unitVec(r.dir);
+        canfocus = false;
     } else if (gcfg.srctype == MCX_SRC_LINE || gcfg.srctype == MCX_SRC_SLIT) {
         float t = rng.uniform(0.0f, 1.0f);
         r.p0.x += t * gcfg.srcparam1.x;
@@ -195,6 +309,32 @@ __device__ __forceinline__ void launchPhoton(optixray& r, mcx::Random& rng) {
             r.dir = vv;
             //*((float3*)&(r.dir))=(float3)(r.dir.y*p-r.dir.z*s,r.vec.z*t-r.vec.x*p,r.vec.x*s-r.vec.y*t);
         }
+
+        origin += 0.5f * make_float3(gcfg.srcparam1.x, gcfg.srcparam1.y, gcfg.srcparam1.z);
+        canfocus = (gcfg.srctype == MCX_SRC_SLIT);
+    }
+
+    /* the incident angles of a focused, isotropic or Lambertian beam, as the other backends do */
+    if (canfocus && gcfg.focus != 0.f) {
+        if (isnan(gcfg.focus)) {
+            float ang, stheta, ctheta, sphi, cphi;
+            sincosf(TWO_PI * rng.uniform(0.0f, 1.0f), &sphi, &cphi);
+            ang = acosf(2.f * rng.uniform(0.0f, 1.0f) - 1.f); //sine distribution
+            sincosf(ang, &stheta, &ctheta);
+            r.dir = rotateVector(r.dir, make_float2(stheta, ctheta), make_float2(sphi, cphi));
+        } else if (isinf(gcfg.focus) && gcfg.focus < 0.f) { // Lambertian (cosine distribution)
+            float stheta, sphi, cphi;
+            sincosf(TWO_PI * rng.uniform(0.0f, 1.0f), &sphi, &cphi);
+            stheta = sqrtf(rng.uniform(0.0f, 1.0f));
+            r.dir = rotateVector(r.dir, make_float2(stheta, sqrtf(1.f - stheta * stheta)), make_float2(sphi, cphi));
+        } else {
+            origin += gcfg.focus * r.dir;
+            r.dir = unitVec((gcfg.focus < 0.f) ? (r.p0 - origin) : (origin - r.p0)); // diverging or converging beam
+        }
+    }
+
+    if (gcfg.srcnum > 1) {
+        ((uint*)gcfg.slotbuffer)[optixGetLaunchIndex().x] = posidx;
     }
 
     r.slen = rng.rand_next_scatlen();
@@ -329,6 +469,127 @@ __device__ __forceinline__ void saveToBufferIm(const uint& eid, const float& w) 
 }
 
 /**
+ * @brief The pattern pixel of the current photon of a pattern source shared by srcnum
+ * patterns, or the source slot of the photon in the multi-source mode
+ */
+__device__ __forceinline__ uint threadSlot() {
+    return ((uint*)gcfg.slotbuffer)[optixGetLaunchIndex().x];
+}
+
+/**
+ * @brief Save a deposit to the output; a pattern source with srcnum > 1 patterns saves one
+ * deposit per pattern, scaled by the pattern intensity at the launch pixel of the photon,
+ * in the layout of the other backends: [(gate*nvox+voxel)*srcnum+pattern]
+ */
+__device__ __forceinline__ void saveOutput(uint eid, const float& w, const float& w_im, const bool& isrf) {
+    if (gcfg.srcnum > 1) {
+        const float* pat = (float*)gcfg.srcpattern + threadSlot() * gcfg.srcnum;
+        eid *= gcfg.srcnum;
+
+        for (int k = 0; k < gcfg.srcnum; k++) {
+            saveToBuffer(eid + k, w * pat[k]);
+
+            if (isrf) {
+                saveToBufferIm(eid + k, w_im * pat[k]);
+            }
+        }
+
+        return;
+    }
+
+    /* multi-source mode: the field of each source slot follows that of the previous slot */
+    if (gcfg.srcid < 0 && gcfg.extrasrclen > 0) {
+        eid += threadSlot() * gcfg.crop0.z * gcfg.maxgate;
+    }
+
+    saveToBuffer(eid, w);
+
+    if (isrf) {
+        saveToBufferIm(eid, w_im);
+    }
+}
+
+/**
+ * @brief The per-thread detected photon scratch: nscat per medium, ppath per medium and the
+ * initial weight (2*maxmedia+1 floats), the same as the ppath array of the OpenCL/CUDA kernels
+ */
+__device__ __forceinline__ float* threadPath() {
+    return (float*)gcfg.ppathbuffer + optixGetLaunchIndex().x * (2 * gcfg.maxmedia + 1);
+}
+
+/**
+ * @brief Clear the detected photon scratch of a newly launched photon
+ */
+__device__ __forceinline__ void clearPath(const float& w0) {
+    float* ppath = threadPath();
+
+    for (int i = 0; i < 2 * gcfg.maxmedia; i++) {
+        ppath[i] = 0.f;
+    }
+
+    ppath[2 * gcfg.maxmedia] = w0;
+}
+
+/**
+ * @brief Save an exiting photon if it leaves through a detector, in the record layout of the
+ * other backends: detector id, nscat and ppath per medium, exit position and direction
+ * (if issaveexit), initial weight
+ */
+__device__ __forceinline__ void saveDetPhoton(const optixray& r) {
+    for (int i = 0; i < gcfg.detnum; i++) {
+        float4 det = ((float4*)gcfg.detposbuffer)[i];
+        float dx = det.x - r.p0.x, dy = det.y - r.p0.y, dz = det.z - r.p0.z;
+
+        if (dx * dx + dy * dy + dz * dz < det.w * det.w) {
+            unsigned int idx = atomicAdd((unsigned int*)gcfg.detbuffer, 1u);
+
+            if (idx < (unsigned int)gcfg.maxdetphoton) {
+                const int reclen = 2 * gcfg.maxmedia + 2 + gcfg.issaveexit * 6;
+                float* rec = (float*)gcfg.detbuffer + 1 + (size_t)idx * reclen;
+                float* ppath = threadPath();
+
+                rec[0] = (float)(i + 1);
+
+                for (int j = 0; j < 2 * gcfg.maxmedia; j++) {
+                    rec[1 + j] = ppath[j];
+                }
+
+                if (gcfg.issaveexit) {
+                    rec[2 * gcfg.maxmedia + 1] = r.p0.x;
+                    rec[2 * gcfg.maxmedia + 2] = r.p0.y;
+                    rec[2 * gcfg.maxmedia + 3] = r.p0.z;
+                    rec[2 * gcfg.maxmedia + 4] = r.dir.x;
+                    rec[2 * gcfg.maxmedia + 5] = r.dir.y;
+                    rec[2 * gcfg.maxmedia + 6] = r.dir.z;
+                }
+
+                rec[reclen - 1] = ppath[2 * gcfg.maxmedia];
+            }
+
+            return;
+        }
+    }
+}
+
+/**
+ * @brief Save a trajectory point (-D M) in the record layout of the other backends: photon
+ * index, position, weight and, in place of the element index, the medium label
+ */
+__device__ __forceinline__ void saveTraj(const optixray& r, const uint& id) {
+    uint pos = atomicAdd((unsigned int*)gcfg.trajbuffer, 1u);
+
+    if (pos < (uint)gcfg.maxjumpdebug) {
+        float* rec = (float*)gcfg.trajbuffer + 1 + (size_t)pos * 6;
+        rec[0] = __uint_as_float(id);
+        rec[1] = r.p0.x;
+        rec[2] = r.p0.y;
+        rec[3] = r.p0.z;
+        rec[4] = r.weight;
+        rec[5] = __uint_as_float((r.mediumid >= DEAD_MEDIUM_ID) ? 0u : r.mediumid);  /* 0 once the photon has ended */
+    }
+}
+
+/**
  * @brief Accumulate output quantities to a 3D grid
  */
 __device__ __forceinline__ void accumulateOutput(optixray& r, const Medium& prop,
@@ -378,6 +639,13 @@ __device__ __forceinline__ void accumulateOutput(optixray& r, const Medium& prop
 
     // find the information of the first segment
     uint oldeid = getTimeFrame(currtof) + getVoxelIdx(segmid);
+
+    /* adjoint J_mus/J_musp: the medium label of each voxel the photon deposits in, for the
+       chain-rule factor applied per voxel by the adjoint post-processing */
+    if (gcfg.savevoxtype) {
+        ((int*)gcfg.voxtypebuffer)[getVoxelIdx(segmid)] = r.mediumid;
+    }
+
     float oldweight = segloss;
     float oldweight_im = segloss_im;
 
@@ -404,10 +672,10 @@ __device__ __forceinline__ void accumulateOutput(optixray& r, const Medium& prop
 
         // save when entering a new element or during the last segment
         if (neweid != oldeid) {
-            saveToBuffer(oldeid, oldweight);
+            saveOutput(oldeid, oldweight, oldweight_im, isrf);
 
-            if (isrf) {
-                saveToBufferIm(oldeid, oldweight_im);
+            if (gcfg.savevoxtype) {
+                ((int*)gcfg.voxtypebuffer)[getVoxelIdx(segmid)] = r.mediumid;
             }
 
             // reset oldeid and weight bucket
@@ -421,11 +689,7 @@ __device__ __forceinline__ void accumulateOutput(optixray& r, const Medium& prop
     }
 
     // save the weight loss of the last segment
-    saveToBuffer(oldeid, oldweight);
-
-    if (isrf) {
-        saveToBufferIm(oldeid, oldweight_im);
-    }
+    saveOutput(oldeid, oldweight, oldweight_im, isrf);
 
     // update both real and imaginary weight in ray after all segments
     if (isrf) {
@@ -491,9 +755,9 @@ __device__ __forceinline__ void accumEnergy(float& acc, float& acc2, const float
 }
 
 /**
- * @brief Add a thread's energy sums to the 4 floats after the output grids (2 or, for RF,
- * 4 blocks of crop0.w): [tot, esc] and their secondary sums at [2, 3], using the same
- * dual single-precision buffer as saveToBuffer
+ * @brief Add a thread's energy sums to the 4 floats (per pattern) after the output grids (2
+ * or, for RF, 4 blocks of crop0.w): [tot, esc] and their secondary sums at [2, 3], using the
+ * same dual single-precision buffer as saveToBuffer
  */
 __device__ __forceinline__ void saveEnergy(const int& idx, const float& acc, const float& acc2) {
     float* buf = (float*)gcfg.outputbuffer + gcfg.crop0.w * ((gcfg.omega != 0.f) ? 4 : 2);
@@ -508,6 +772,20 @@ __device__ __forceinline__ void saveEnergy(const int& idx, const float& acc, con
     }
 
     atomicAdd(buf + idx + 2, acc2);
+}
+
+/**
+ * @brief Add the weight of a launched (isesc=0) or escaped (isesc=1) photon of a pattern
+ * source shared by srcnum patterns to the per-thread energy sums of each pattern, kept in
+ * global memory as [tot, esc, tot2, esc2] per pattern
+ */
+__device__ __forceinline__ void accumPatternEnergy(const int& isesc, const float& w) {
+    float* e = (float*)gcfg.energybuffer + (size_t)optixGetLaunchIndex().x * 4 * gcfg.srcnum;
+    const float* pat = (float*)gcfg.srcpattern + threadSlot() * gcfg.srcnum;
+
+    for (int k = 0; k < gcfg.srcnum; k++) {
+        accumEnergy(e[k * 4 + isesc], e[k * 4 + isesc + 2], w * pat[k]);
+    }
 }
 
 /**
@@ -528,37 +806,79 @@ extern "C" __global__ void __raygen__rg() {
         return;
     }
 
-    // init a ray
     optixray r;
-    launchPhoton(r, rng);
-
     int ndone = 0;  // number of simulated photons
 
     /* launched and escaped energy of this thread, as the other backends tally them: the
        weight a photon still carries when it ends (escape or time limit) has escaped;
        |w| for RF, which the phase rotation leaves unchanged */
     float energytot = 0.f, energytot2 = 0.f, energyesc = 0.f, energyesc2 = 0.f;
-    accumEnergy(energytot, energytot2, r.weight);
 
-    while (ndone < nphoton) {
+    /* photons are launched at one place in the loop, so the source code is inlined once */
+    r.mediumid = DEAD_MEDIUM_ID;
+    r.photontimer = 0.f;
+    bool islaunch = true;
+
+    while (true) {
+        if (islaunch) {
+            launchPhoton(r, rng);
+            islaunch = false;
+
+            if (gcfg.savetraj) {
+                /* the photon index of the OpenCL/CUDA kernels: consecutive in each thread */
+                uint id = launchindex.x * gcfg.threadphoton + min(launchindex.x, (uint)gcfg.oddphoton) + ndone;
+                ((uint*)gcfg.photonidbuffer)[launchindex.x] = id;
+                saveTraj(r, id);
+            }
+
+            if (gcfg.srcnum > 1) {
+                accumPatternEnergy(0, r.weight);
+            } else {
+                accumEnergy(energytot, energytot2, r.weight);
+            }
+
+            if (gcfg.issavedet) {
+                clearPath((gcfg.srcnum > 1) ? __uint_as_float(threadSlot()) : r.weight);  /* the pattern pixel, as the other backends save it */
+            }
+        }
+
         if (r.mediumid != DEAD_MEDIUM_ID) {
             movePhoton(r, rng);
         }
 
         // when a photon escapes or tof reaches the upper limit
         if (!(r.mediumid != DEAD_MEDIUM_ID && r.photontimer < gcfg.tend)) {
-            accumEnergy(energyesc, energyesc2, (gcfg.omega != 0.f) ? sqrtf(r.weight * r.weight + r.weight_im * r.weight_im) : r.weight);
-            ++ndone;
+            float wesc = (gcfg.omega != 0.f) ? sqrtf(r.weight * r.weight + r.weight_im * r.weight_im) : r.weight;
 
-            if (ndone < nphoton) {
-                launchPhoton(r, rng);
-                accumEnergy(energytot, energytot2, r.weight);
+            if (gcfg.savetraj) {
+                saveTraj(r, ((uint*)gcfg.photonidbuffer)[launchindex.x]);
             }
+
+            if (gcfg.srcnum > 1) {
+                accumPatternEnergy(1, wesc);
+            } else {
+                accumEnergy(energyesc, energyesc2, wesc);
+            }
+
+            if (++ndone >= nphoton) {
+                break;
+            }
+
+            islaunch = true;
         }
     }
 
-    saveEnergy(0, energytot, energytot2);
-    saveEnergy(1, energyesc, energyesc2);
+    if (gcfg.srcnum > 1) {
+        const float* e = (float*)gcfg.energybuffer + (size_t)launchindex.x * 4 * gcfg.srcnum;
+
+        for (int k = 0; k < gcfg.srcnum; k++) {
+            saveEnergy(k * 4, e[k * 4], e[k * 4 + 2]);
+            saveEnergy(k * 4 + 1, e[k * 4 + 1], e[k * 4 + 3]);
+        }
+    } else {
+        saveEnergy(0, energytot, energytot2);
+        saveEnergy(1, energyesc, energyesc2);
+    }
 }
 
 /**
@@ -607,6 +927,10 @@ extern "C" __global__ void __closesthit__ch() {
     // wide-field source photon crosses from its launch plane to the tissue surface
     if (r.mediumid != AMBIENT_MEDIUM_ID) {
         accumulateOutput(r, currprop, lmove);
+
+        if (gcfg.issavedet) {
+            threadPath()[gcfg.maxmedia + r.mediumid - 1] += lmove;  /* the partial path per medium */
+        }
     }
 
     // update photon position
@@ -641,6 +965,10 @@ extern "C" __global__ void __closesthit__ch() {
     // terminate once a ray leaves the tissue for the ambient medium, also at a
     // matched boundary or without -b 1, the same as the other tracers do on exit
     if (r.mediumid == AMBIENT_MEDIUM_ID) {
+        if (gcfg.issavedet) {
+            saveDetPhoton(r);
+        }
+
         r.mediumid = DEAD_MEDIUM_ID;
     }
 
@@ -684,6 +1012,13 @@ extern "C" __global__ void __miss__ms() {
     // save output; for RF mode, also updates r.weight and r.weight_im inside
     accumulateOutput(r, currprop, lmove);
 
+    // the partial path and the scattering count of this medium
+    if (gcfg.issavedet) {
+        float* ppath = threadPath();
+        ppath[gcfg.maxmedia + r.mediumid - 1] += lmove;
+        ppath[r.mediumid - 1] += 1.f;
+    }
+
     // update photon position
     r.p0 += r.dir * lmove;
 
@@ -698,6 +1033,10 @@ extern "C" __global__ void __miss__ms() {
     // scattering event
     r.dir = selectScatteringDirection(r.dir, currprop.g, rng);
     r.slen = rng.rand_next_scatlen();
+
+    if (gcfg.savetraj) {
+        saveTraj(r, ((uint*)gcfg.photonidbuffer)[optixGetLaunchIndex().x]);
+    }
 
     // update rng
     setRNG(rng);

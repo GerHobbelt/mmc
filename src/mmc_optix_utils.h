@@ -78,6 +78,17 @@ struct OptixParams {
     /*! buffer for extra source list (adjoint/multi-source mode) */
     osc::CUDABuffer srcdataBuffer;
 
+    /*! detected photon output: detectors, records and the per-thread partial-path scratch */
+    osc::CUDABuffer detposBuffer;
+    osc::CUDABuffer detBuffer;
+    osc::CUDABuffer ppathBuffer;
+    osc::CUDABuffer srcpatternBuffer;   /**< pattern source intensities */
+    osc::CUDABuffer slotBuffer;         /**< per-thread pattern pixel (srcnum > 1) */
+    osc::CUDABuffer energyBuffer;       /**< per-thread energy sums of each pattern (srcnum > 1) */
+    osc::CUDABuffer voxtypeBuffer;      /**< the medium label of each voxel (adjoint J_mus/J_musp) */
+    osc::CUDABuffer trajBuffer;         /**< trajectory records (-D M) */
+    osc::CUDABuffer photonidBuffer;     /**< per-thread photon index (-D M) */
+
     /*! buffer for output storage */
     float* outputHostBuffer;
     unsigned int outputBufferSize;
@@ -99,6 +110,7 @@ void createHitgroupPrograms(OptixParams* optixcfg);
 OptixTraversableHandle buildAccel(tetmesh* mesh, OptixParams* optixcfg);
 void createPipeline(OptixParams* optixcfg);
 void buildSBT(tetmesh* mesh, OptixParams* optixcfg);
+void prepBoundParams(mcconfig* cfg, tetmesh* mesh, OptixParams* optixcfg);
 void prepLaunchParams(mcconfig* cfg, tetmesh* mesh, GPUInfo* gpu,
                       OptixParams* optixcfg);
 void clearOptixParams(OptixParams* optixcfg);

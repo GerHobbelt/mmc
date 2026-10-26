@@ -60,6 +60,10 @@
 #endif
 #include "nifti1.h"
 
+/* the number of floats the input file gave for the source pattern, checked in
+   mcx_validatecfg against what the pattern dimensions and SrcNum will read */
+static size_t srcpatternlen = 0;
+
 /**
  * Macro to load JSON keys
  */
@@ -316,6 +320,7 @@ void mcx_initcfg(mcconfig* cfg) {
     memset(&(cfg->srcparam1), 0, sizeof(float4));
     memset(&(cfg->srcparam2), 0, sizeof(float4));
     cfg->srcpattern = NULL;
+    srcpatternlen = 0;
     cfg->voidtime = 1;
     memset(cfg->checkpt, 0, sizeof(unsigned int)*MAX_CHECKPOINT);
 
@@ -1577,6 +1582,20 @@ int mcx_loadfromjson(char* jbuf, mcconfig* cfg) {
 }
 
 /**
+ * Stops with a message naming APath unless ARow is an array of at least
+ * AMinLen elements.  The readers walk a row as child->next->next...; one
+ * that is short, empty or not an array at all walks off the end into NULL.
+ */
+static void mcx_json_needrow(cJSON* row, int minlen, const char* path) {
+    char msg[MAX_PATH_LENGTH];
+
+    if (row == NULL || !cJSON_IsArray(row) || cJSON_GetArraySize(row) < minlen) {
+        snprintf(msg, MAX_PATH_LENGTH, "%s must be an array of at least %d numbers", path, minlen);
+        MMC_ERROR(-1, msg);
+    }
+}
+
+/**
  * @brief Load user inputs from a .json input file
  *
  * This function loads user input from a JSON format in a .json extension
@@ -1753,11 +1772,11 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
 
                 if (cJSON_IsArray(subitem)) {
                     int collen, rowlen = cJSON_GetArraySize(subitem);
-                    subitem = subitem->child;
 
-                    if (cJSON_IsArray(subitem)) {
+                    if (cJSON_IsArray(subitem->child)) {
+                        subitem = subitem->child;
                         collen = cJSON_GetArraySize(subitem);
-                    } else {
+                    } else {  /* a flat list of per-node values is a single row */
                         collen = rowlen;
                         rowlen = 1;
                     }
@@ -1797,6 +1816,8 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
         /* a surface-only mesh has no elements; OptiX then finds the initial medium by tracing a ray from the source */
         if (cfg->surfnum > 0 && !FIND_JSON_OBJ("InitElem", "Mesh.InitElem", Mesh)) {
             cfg->e0 = -1;
+        } else if (cfg->e0 > 0 && !FIND_JSON_OBJ("InitElem", "Mesh.InitElem", Mesh)) {
+            /* keep the InitElem of an earlier input, such as -f before a partial --json */
         } else {
             cfg->e0 = FIND_JSON_KEY("InitElem", "Mesh.InitElem", Mesh, (MMC_ERROR(-1, "InitElem must be given"), 0.0), valueint);
         }
@@ -1847,6 +1868,7 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
                             cfg->prop[i].n = val->valuedouble;
                         }
                     } else if (cJSON_IsArray(med)) {
+                        mcx_json_needrow(med, 4, "each Domain.Media row");
                         cfg->prop[i].mua = med->child->valuedouble;
                         cfg->prop[i].mus = med->child->next->valuedouble;
                         cfg->prop[i].g = med->child->next->next->valuedouble;
@@ -1909,6 +1931,8 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
                     subitem = subitem->child;
                 }
 
+                mcx_json_needrow(subitem, 3, "Optode.Source.Pos");
+
                 cfg->srcpos.x = subitem->child->valuedouble;
                 cfg->srcpos.y = subitem->child->next->valuedouble;
                 cfg->srcpos.z = subitem->child->next->next->valuedouble;
@@ -1930,6 +1954,7 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
 
                     while (subitem->next && count < cfg->extrasrclen) {
                         subitem = subitem->next;
+                        mcx_json_needrow(subitem, 3, "Optode.Source.Pos");
                         cfg->srcdata[count].srcpos.x = subitem->child->valuedouble;
                         cfg->srcdata[count].srcpos.y = subitem->child->next->valuedouble;
                         cfg->srcdata[count].srcpos.z = subitem->child->next->next->valuedouble;
@@ -1962,6 +1987,8 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
                     subitem = subitem->child;
                 }
 
+                mcx_json_needrow(subitem, 3, "Optode.Source.Dir");
+
                 cfg->srcdir.x = subitem->child->valuedouble;
                 cfg->srcdir.y = subitem->child->next->valuedouble;
                 cfg->srcdir.z = subitem->child->next->next->valuedouble;
@@ -1992,6 +2019,7 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
 
                     while (subitem->next && count < cfg->extrasrclen) {
                         subitem = subitem->next;
+                        mcx_json_needrow(subitem, 3, "Optode.Source.Dir");
                         cfg->srcdata[count].srcdir.x = subitem->child->valuedouble;
                         cfg->srcdata[count].srcdir.y = subitem->child->next->valuedouble;
                         cfg->srcdata[count].srcdir.z = subitem->child->next->next->valuedouble;
@@ -2048,6 +2076,8 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
                     subitem = subitem->child;
                 }
 
+                mcx_json_needrow(subitem, 1, "Optode.Source.Param1");
+
                 cfg->srcparam1.x = subitem->child->valuedouble;
 
                 if (subitem->child->next) {
@@ -2072,6 +2102,7 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
 
                     while (subitem->next && count < cfg->extrasrclen) {
                         subitem = subitem->next;
+                        mcx_json_needrow(subitem, 1, "Optode.Source.Param1");
                         cfg->srcdata[count].srcparam1.x = subitem->child->valuedouble;
 
                         if (subitem->child->next) {
@@ -2110,6 +2141,8 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
                     subitem = subitem->child;
                 }
 
+                mcx_json_needrow(subitem, 1, "Optode.Source.Param2");
+
                 cfg->srcparam2.x = subitem->child->valuedouble;
 
                 if (subitem->child->next) {
@@ -2134,6 +2167,7 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
 
                     while (subitem->next && count < cfg->extrasrclen) {
                         subitem = subitem->next;
+                        mcx_json_needrow(subitem, 1, "Optode.Source.Param2");
                         cfg->srcdata[count].srcparam2.x = subitem->child->valuedouble;
 
                         if (subitem->child->next) {
@@ -2150,6 +2184,16 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
 
                         count++;
                     }
+                }
+            }
+
+            /* the number of patterns sharing the photons, which mcx_savejdata writes; a 3-D
+               JData pattern below also gives it as its first dimension */
+            if (FIND_JSON_OBJ("SrcNum", "Optode.Source.SrcNum", src)) {
+                cfg->srcnum = FIND_JSON_KEY("SrcNum", "Optode.Source.SrcNum", src, cfg->srcnum, valueint);
+
+                if (cfg->srcnum < 1 || cfg->srcnum > 1000000) {
+                    MMC_ERROR(-1, "Optode.Source.SrcNum (the number of patterns) must be between 1 and 1000000");
                 }
             }
 
@@ -2175,6 +2219,8 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
                         MMC_ERROR(-1, "Optode.Source.Pattern JData-annotated array must be in the 'single' format");
                     }
 
+                    srcpatternlen = (size_t)dims[0] * dims[1] * dims[2];
+
                     if (ndim == 3 && dims[2] > 1 && dims[0] > 1 && cfg->srctype == MCX_SRC_PATTERN) {
                         cfg->srcnum = dims[0];
                     }
@@ -2185,7 +2231,7 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
                     int ny = FIND_JSON_KEY("Ny", "Optode.Source.Pattern.Ny", subitem, 0, valueint);
                     int nz = FIND_JSON_KEY("Nz", "Optode.Source.Pattern.Nz", subitem, 1, valueint);
 
-                    if (nx > 0 && ny > 0) {
+                    if (nx > 0 && ny > 0 && nz > 0 && (double)nx * ny * nz * cfg->srcnum < 2147483647.0) {
                         cJSON* pat = FIND_JSON_OBJ("Data", "Optode.Source.Pattern.Data", subitem);
 
                         if (pat && pat->child) {
@@ -2197,6 +2243,7 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
                             }
 
                             cfg->srcpattern = (float*)calloc(nx * ny * nz * cfg->srcnum, sizeof(float));
+                            srcpatternlen = (size_t)nx * ny * nz * cfg->srcnum;
 
                             for (i = 0; i < nx * ny * nz * cfg->srcnum; i++) {
                                 if (pat == NULL) {
@@ -2220,6 +2267,8 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
                                     fclose(fid);
                                     MMC_ERROR(-1, "Fail to read pattern input file");
                                 }
+
+                                srcpatternlen = (size_t)nx * ny * nz * cfg->srcnum;
 
                                 fclose(fid);
                             }
@@ -2274,6 +2323,7 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
                     }
 
                     if (pos && cJSON_GetArraySize(pos) >= 3) {
+                        mcx_json_needrow(pos, 3, "Optode.Detector.Pos");
                         cfg->detpos[i].x = pos->child->valuedouble;
                         cfg->detpos[i].y = pos->child->next->valuedouble;
                         cfg->detpos[i].z = pos->child->next->next->valuedouble;
@@ -2448,6 +2498,16 @@ int mcx_loadjson(cJSON* root, mcconfig* cfg) {
         cfg->nout = FIND_JSON_KEY("N0", "Forward.N0", Forward, cfg->nout, valuedouble);
         cfg->omega = FIND_JSON_KEY("Omega", "Forward.Omega", Forward, cfg->omega, valuedouble);
 
+        /* checked before the division and the conversion: a Dt of nought or
+           less, or one so small the count overflows an int, is undefined */
+        if (cfg->tstart > cfg->tend || !(cfg->tstep > 0.f)) {
+            MMC_ERROR(-9, "incorrect time gate settings");
+        }
+
+        if (!((cfg->tend - cfg->tstart) / cfg->tstep < 1e6)) {
+            MMC_ERROR(-9, "too many time gates: (T1-T0)/Dt must be below one million");
+        }
+
         cfg->maxgate = (int)((cfg->tend - cfg->tstart) / cfg->tstep + 0.5);
     }
 
@@ -2610,7 +2670,7 @@ void mcx_loadconfig(FILE* in, mcconfig* cfg) {
         MMC_FPRINTF(stdout, ">> %f %f %f\nPlease specify the mesh file key {node,elem,velem,facenb}_key.dat :\n\t",
                     cfg->tstart, cfg->tend, cfg->tstep);
 
-    if (cfg->tstart > cfg->tend || cfg->tstep == 0.f) {
+    if (cfg->tstart > cfg->tend || !(cfg->tstep > 0.f)) {
         MMC_ERROR(-9, "incorrect time gate settings");
     }
 
@@ -2622,16 +2682,7 @@ void mcx_loadconfig(FILE* in, mcconfig* cfg) {
     /*if(cfg->maxgate>gates)*/
     cfg->maxgate = gates;
 
-    MMC_ASSERT(fscanf(in, "%s", cfg->meshtag) == 1);
-
-    if (cfg->rootpath[0]) {
-#ifdef WIN32
-        sprintf(comment, "%s\\%s", cfg->rootpath, cfg->meshtag);
-#else
-        sprintf(comment, "%s/%s", cfg->rootpath, cfg->meshtag);
-#endif
-        memcpy(cfg->meshtag, comment, MAX_SESSION_LENGTH);
-    }
+    MMC_ASSERT(fscanf(in, "%s", cfg->meshtag) == 1);  /* mesh_filenames adds the root folder to the mesh files */
 
     comm = fgets(comment, MAX_PATH_LENGTH, in);
 
@@ -2726,9 +2777,15 @@ void mcx_loadconfig(FILE* in, mcconfig* cfg) {
                     // in case only one parameter is provided, use the default srcnum value (1)
                     MMC_ASSERT(fscanf(in, "%s %d", srcpatternfile, &(cfg->srcnum)) >= 1);
 
-                    if (cfg->srcnum < 1) {
-                        MMC_ERROR(-6, "the number of patterns cannot be smaller than 1");
+                    if (cfg->srcnum < 1 || cfg->srcnum > 1000000) {
+                        MMC_ERROR(-6, "the number of patterns must be between 1 and 1000000");
                     }
+
+                    if (!(cfg->srcparam1.w >= 1.f && cfg->srcparam2.w >= 1.f && (double)cfg->srcparam1.w * cfg->srcparam2.w * cfg->srcnum < 2147483647.0)) {
+                        MMC_ERROR(-6, "the pattern size, the 4th elements of srcparam1 and srcparam2, must be at least 1");
+                    }
+
+                    srcpatternlen = (size_t)((int)cfg->srcparam1.w * (int)cfg->srcparam2.w) * cfg->srcnum;
 
                     cfg->srcpattern = (float*)calloc((cfg->srcparam1.w * cfg->srcparam2.w * cfg->srcnum), sizeof(float));
                     comm = fgets(comment, MAX_PATH_LENGTH, in);
@@ -3171,8 +3228,37 @@ void  mcx_convertcol2row4d(unsigned int** vol, uint4* dim) {
  * @param[in] obj: a pre-created cJSON object to store the output JData fields
  */
 
+/**
+ * Bytes per element of a JData _ArrayType_, or 0 for a name that is not one of
+ * the numeric types.
+ */
+static int mcx_jdata_typesize(const char* type) {
+    if (type == NULL) {
+        return 0;
+    }
+
+    if (!strcmp(type, "uint8") || !strcmp(type, "int8") || !strcmp(type, "char") || !strcmp(type, "uchar") || !strcmp(type, "logical")) {
+        return 1;
+    }
+
+    if (!strcmp(type, "uint16") || !strcmp(type, "int16")) {
+        return 2;
+    }
+
+    if (!strcmp(type, "uint32") || !strcmp(type, "int32") || !strcmp(type, "single") || !strcmp(type, "float32")) {
+        return 4;
+    }
+
+    if (!strcmp(type, "uint64") || !strcmp(type, "int64") || !strcmp(type, "double") || !strcmp(type, "float64")) {
+        return 8;
+    }
+
+    return 0;
+}
+
 int  mcx_jdatadecode(void** vol, int* ndim, uint* dims, int maxdim, char** type, cJSON* obj, mcconfig* cfg) {
     int ret = 0;
+    size_t elemnum = 1, nbytes = 0;
     cJSON* ztype = NULL;
     cJSON* vsize = cJSON_GetObjectItem(obj, "_ArraySize_");
     cJSON* vtype = cJSON_GetObjectItem(obj, "_ArrayType_");
@@ -3183,13 +3269,35 @@ int  mcx_jdatadecode(void** vol, int* ndim, uint* dims, int maxdim, char** type,
         vdata = cJSON_GetObjectItem(obj, "_ArrayZipData_");
     }
 
-    if (vtype) {
-        *type = vtype->valuestring;
+    /* every annotation is checked before any of it is used: a field of the
+       wrong JSON type has a NULL valuestring, and a size that does not match
+       the data has every caller -- the mesh readers above all -- read past
+       the end of the array */
+    if (!vdata) {
+        MMC_ERROR(-1, "No _ArrayZipData_ field is found");
     }
+
+    if (!cJSON_IsString(vdata)) {
+        MMC_ERROR(-1, "_ArrayData_ and _ArrayZipData_ must be base64 strings");
+    }
+
+    if (!vtype || !cJSON_IsString(vtype) || mcx_jdata_typesize(vtype->valuestring) == 0) {
+        MMC_ERROR(-1, "a JData array needs an _ArrayType_ naming a numeric type, such as \"int32\" or \"single\"");
+    }
+
+    if (!vsize || !(cJSON_IsArray(vsize) || cJSON_IsNumber(vsize))) {
+        MMC_ERROR(-1, "a JData array needs an _ArraySize_ of positive integers");
+    }
+
+    if (ztype && !cJSON_IsString(ztype)) {
+        MMC_ERROR(-1, "_ArrayZipType_ must be a string");
+    }
+
+    *type = vtype->valuestring;
 
     /* only infer the media format from the array type if the input did not set it; the
        array type is returned regardless, as the callers check it (e.g. the source pattern) */
-    if (!flagset['K'] && vtype) {
+    if (!flagset['K']) {
         if (strstr(*type, "int8")) {
             cfg->mediabyte = 1;
         } else if (strstr(*type, "int16")) {
@@ -3201,57 +3309,87 @@ int  mcx_jdatadecode(void** vol, int* ndim, uint* dims, int maxdim, char** type,
         }
     }
 
-    if (vdata) {
-        if (vsize) {
-            cJSON* tmp = vsize->child;
-            *ndim = cJSON_GetArraySize(vsize);
+    {
+        /* a 1-D size may be written as a plain number */
+        cJSON* tmp = cJSON_IsArray(vsize) ? vsize->child : vsize;
+        *ndim = cJSON_IsArray(vsize) ? cJSON_GetArraySize(vsize) : 1;
 
-            for (int i = 0; i < MIN(maxdim, *ndim); i++) {
-                dims[i] = tmp->valueint;
-                tmp = tmp->next;
-            }
+        if (*ndim < 1) {
+            MMC_ERROR(-1, "a JData array needs an _ArraySize_ of positive integers");
         }
 
-        if (ztype) {
-            size_t len, newlen;
-            int status = 0;
-            char* buf = NULL;
-            int zipid = mcx_keylookup((char*)(ztype->valuestring), zipformat);
-            ret = zmat_decode(strlen(vdata->valuestring), (uchar*)vdata->valuestring, &len, (uchar**)&buf, zmBase64, &status);
-
-            if (!ret && vsize) {
-                if (*vol) {
-                    free(*vol);
-                }
-
-                ret = zmat_decode(len, (uchar*)buf, &newlen, (uchar**)(vol), zipid, &status);
+        for (int i = 0; i < *ndim; i++, tmp = tmp->next) {
+            if (!cJSON_IsNumber(tmp) || tmp->valuedouble < 1 || tmp->valuedouble > 2147483647.0) {
+                MMC_ERROR(-1, "a JData array needs an _ArraySize_ of positive integers");
             }
 
-            if (buf) {
-                free(buf);
+            if (i < maxdim) {
+                dims[i] = (uint)tmp->valuedouble;
             }
 
-            cfg->isrowmajor = 1;
-        } else {
-            /* uncompressed _ArrayData_: base64-decode only, no further zmat pass */
-            size_t len;
-            int status = 0;
+            elemnum *= (size_t)tmp->valuedouble;
 
+            if (elemnum > ((size_t)1 << 40)) {
+                MMC_ERROR(-1, "the JData array is too large");
+            }
+        }
+    }
+
+    if (ztype) {
+        size_t len = 0, newlen = 0;
+        int status = 0;
+        char* buf = NULL;
+        int zipid = mcx_keylookup((char*)(ztype->valuestring), zipformat);
+
+        if (zipid < 0) {
+            MMC_ERROR(-1, "the JData array uses an unsupported _ArrayZipType_");
+        }
+
+        ret = zmat_decode(strlen(vdata->valuestring), (uchar*)vdata->valuestring, &len, (uchar**)&buf, zmBase64, &status);
+
+        /* a string that is not base64 decodes to nothing, with no length set */
+        if (!ret && buf != NULL && len > 0) {
             if (*vol) {
                 free(*vol);
                 *vol = NULL;
             }
 
-            ret = zmat_decode(strlen(vdata->valuestring), (uchar*)vdata->valuestring, &len, (uchar**)(vol), zmBase64, &status);
-            cfg->isrowmajor = 1;
+            ret = zmat_decode(len, (uchar*)buf, &newlen, (uchar**)(vol), zipid, &status);
+        } else {
+            ret = -1;
         }
+
+        if (buf) {
+            free(buf);
+        }
+
+        nbytes = newlen;
     } else {
-        MMC_ERROR(-1, "No _ArrayZipData_ field is found");
+        /* uncompressed _ArrayData_: base64-decode only, no further zmat pass */
+        size_t len = 0;
+        int status = 0;
+
+        if (*vol) {
+            free(*vol);
+            *vol = NULL;
+        }
+
+        ret = zmat_decode(strlen(vdata->valuestring), (uchar*)vdata->valuestring, &len, (uchar**)(vol), zmBase64, &status);
+        nbytes = len;
     }
 
+    if (ret || *vol == NULL) {
+        MMC_ERROR(-1, "the JData array data could not be decoded");
+    }
+
+    /* the decoded bytes have to cover the declared size */
+    if (nbytes < elemnum * (size_t)mcx_jdata_typesize(*type)) {
+        MMC_ERROR(-1, "the JData array holds fewer values than its _ArraySize_ says");
+    }
+
+    cfg->isrowmajor = 1;
     return ret;
 }
-
 /**
  * @brief Export an ND volumetric image to JSON/JData encoded construct
  *
@@ -3532,6 +3670,10 @@ int mcx_readarg(int argc, char* argv[], int id, void* output, const char* type) 
             nexttok = strtok(argv[id + 1], " ,;");
 
             while (nexttok) {
+                if (len >= MAX_DEVICE - 1) { /* room for the terminating zero */
+                    break;
+                }
+
                 numlist[len++] = (char)(atoi(nexttok)); /*device id<256*/
 
                 for (i = 0; i < len - 1; i++) /* remove duplicaetd ids */
@@ -3550,6 +3692,10 @@ int mcx_readarg(int argc, char* argv[], int id, void* output, const char* type) 
             nexttok = strtok(argv[id + 1], " ,;");
 
             while (nexttok) {
+                if (len >= MAX_DEVICE) { /* the lists read this way are MAX_DEVICE long */
+                    break;
+                }
+
                 numlist[len++] = atof(nexttok); /*device id<256*/
                 nexttok = strtok(NULL, " ,;");
             }
@@ -3558,6 +3704,29 @@ int mcx_readarg(int argc, char* argv[], int id, void* output, const char* type) 
         MMC_ERROR(-1, "incomplete input");
     }
 
+    return id + 1;
+}
+
+/**
+ * @brief Reads the string value that follows a command line option into a
+ * buffer of len bytes.
+ *
+ * mcx_readarg's "string" type has no size to go by and copies whatever it is
+ * given -- a long -s overran the 64-byte session name into the fields after
+ * it.  This one refuses a value that does not fit instead.
+ */
+static int mcx_readstrarg(int argc, char* argv[], int id, char* output, size_t len) {
+    if (id >= argc - 1) {
+        MMC_ERROR(-1, "incomplete input");
+    }
+
+    if (strlen(argv[id + 1]) >= len) {
+        char msg[MAX_PATH_LENGTH];
+        snprintf(msg, MAX_PATH_LENGTH, "the value given to %s is too long (at most %u characters)", argv[id], (unsigned int)(len - 1));
+        MMC_ERROR(-1, msg);
+    }
+
+    strcpy(output, argv[id + 1]);
     return id + 1;
 }
 
@@ -3703,11 +3872,24 @@ void  mcx_convertrow2col(float* vol, uint3* dim) {
 void mcx_validatecfg(mcconfig* cfg) {
     int i;
 
+    /* the optical properties the kernel divides by and takes logarithms of: a
+       refractive index of nought (a "1.37" written as a string reads as 0) or
+       an infinite scattering coefficient has every photon step forever */
+    for (uint i = 0; i < cfg->medianum; i++) {
+        if (!isfinite(cfg->prop[i].mua) || !isfinite(cfg->prop[i].mus) || !isfinite(cfg->prop[i].g) || !isfinite(cfg->prop[i].n) ||
+                cfg->prop[i].mua < 0.f || cfg->prop[i].mus < 0.f || cfg->prop[i].n <= 0.f || fabsf(cfg->prop[i].g) > 1.f) {
+            char msg[MAX_PATH_LENGTH];
+            snprintf(msg, MAX_PATH_LENGTH, "medium %u: mua and mus must be finite and non-negative, g within [-1,1], and n positive (got %g %g %g %g)",
+                     i, cfg->prop[i].mua, cfg->prop[i].mus, cfg->prop[i].g, cfg->prop[i].n);
+            MMC_ERROR(-1, msg);
+        }
+    }
+
     if (cfg->nphoton <= 0) {
         MMC_ERROR(-2, "cfg.nphoton must be a positive number");
     }
 
-    if (cfg->tstart > cfg->tend || cfg->tstep == 0.f) {
+    if (cfg->tstart > cfg->tend || !(cfg->tstep > 0.f)) {
         MMC_ERROR(-2, "incorrect time gate settings or missing tstart/tend/tstep fields");
     }
 
@@ -3730,8 +3912,42 @@ void mcx_validatecfg(mcconfig* cfg) {
     cfg->maxgate = (int)((cfg->tend - cfg->tstart) / cfg->tstep + 0.5);
     cfg->tend = cfg->tstart + cfg->tstep * cfg->maxgate;
 
-    if (cfg->srctype == stPattern && cfg->srcpattern == NULL) {
-        MMC_ERROR(-2, "the 'srcpattern' field can not be empty when your 'srctype' is 'pattern'");
+    if ((cfg->srctype == stPattern || cfg->srctype == stPattern3D) && cfg->srcpattern == NULL) {
+        MMC_ERROR(-2, "the 'srcpattern' field can not be empty when your 'srctype' is 'pattern' or 'pattern3d'");
+    }
+
+    /* only a pattern source has more than one pattern sharing its photons; any
+       other source tallies, and normalizes, a single solution */
+    if (cfg->srctype != stPattern) {
+        cfg->srcnum = 1;
+    }
+
+    /* launchphoton picks a pattern pixel from the integer parts of these sizes:
+       one below 1 (a size given as a string reads as 0) indexes before the
+       pattern, and sizes the pattern data do not cover index past it */
+    if (cfg->srctype == stPattern || cfg->srctype == stPattern3D) {
+        double need;
+
+        if (cfg->srctype == stPattern) {
+            /* below 2^31 too: launchphoton casts them to int, and (int) of a
+               larger float is not a number of pixels */
+            if (!(cfg->srcparam1.w >= 1.f && cfg->srcparam2.w >= 1.f && cfg->srcparam1.w < 2147483648.f && cfg->srcparam2.w < 2147483648.f)) {
+                MMC_ERROR(-2, "a pattern source needs the pattern size, the 4th elements of srcparam1 and srcparam2, to be between 1 and 2^31");
+            }
+
+            need = floor(cfg->srcparam1.w) * floor(cfg->srcparam2.w) * cfg->srcnum;
+        } else {
+            if (!(cfg->srcparam1.x >= 1.f && cfg->srcparam1.y >= 1.f && cfg->srcparam1.z >= 1.f &&
+                    cfg->srcparam1.x < 2147483648.f && cfg->srcparam1.y < 2147483648.f && cfg->srcparam1.z < 2147483648.f)) {
+                MMC_ERROR(-2, "a pattern3d source needs the pattern size, the first 3 elements of srcparam1, to be between 1 and 2^31");
+            }
+
+            need = floor(cfg->srcparam1.x) * floor(cfg->srcparam1.y) * floor(cfg->srcparam1.z);
+        }
+
+        if (srcpatternlen > 0 && need > (double)srcpatternlen) {
+            MMC_ERROR(-2, "the source pattern has fewer elements than its size times SrcNum");
+        }
     }
 
     if (cfg->srcnum > 1 && cfg->seed == SEED_FROM_FILE) {
@@ -3860,7 +4076,7 @@ void mmc_validate_config(mcconfig* cfg, float* detps, int dimdetps[2], int seedb
         MMC_ERROR(999, "cfg.nphoton must be a positive number");
     }
 
-    if (cfg->tstart > cfg->tend || cfg->tstep == 0.f) {
+    if (cfg->tstart > cfg->tend || !(cfg->tstep > 0.f)) {
         MMC_ERROR(999, "incorrect time gate settings or missing tstart/tend/tstep fields");
     }
 
@@ -4072,7 +4288,7 @@ void mcx_parsecmd(int argc, char* argv[], mcconfig* cfg) {
                         isinteractive = 2;
                         i += (i < argc - 1);
                     } else {
-                        i = mcx_readarg(argc, argv, i, filename, "string");
+                        i = mcx_readstrarg(argc, argv, i, filename, sizeof(filename));
                     }
 
                     break;
@@ -4091,7 +4307,7 @@ void mcx_parsecmd(int argc, char* argv[], mcconfig* cfg) {
                     break;
 
                 case 's':
-                    i = mcx_readarg(argc, argv, i, cfg->session, "string");
+                    i = mcx_readstrarg(argc, argv, i, cfg->session, sizeof(cfg->session));
                     break;
 
                 case 'q':
@@ -4139,6 +4355,20 @@ void mcx_parsecmd(int argc, char* argv[], mcconfig* cfg) {
                         i = mcx_readarg(argc, argv, i, &(cfg->zipid), "int");
                     }
 
+                    {
+                        /* an index into zipformat[]: an unknown name is -1, and a
+                           number was used unchecked */
+                        int nzip = 0;
+
+                        while (zipformat[nzip][0] != '\0') {
+                            nzip++;
+                        }
+
+                        if (cfg->zipid < 0 || cfg->zipid >= nzip) {
+                            MMC_ERROR(-1, "unsupported compression method given to -Z/--zip");
+                        }
+                    }
+
                     break;
 
                 case 'C':
@@ -4174,7 +4404,7 @@ void mcx_parsecmd(int argc, char* argv[], mcconfig* cfg) {
 #if defined(MMC_LOGISTIC) || defined(MMC_SFMT)
                         MMC_ERROR(-1, "seeding file is not supported in this binary");
 #else
-                        i = mcx_readarg(argc, argv, i, cfg->seedfile, "string");
+                        i = mcx_readstrarg(argc, argv, i, cfg->seedfile, sizeof(cfg->seedfile));
                         cfg->seed = SEED_FROM_FILE;
 #endif
                     } else {
@@ -4238,7 +4468,7 @@ void mcx_parsecmd(int argc, char* argv[], mcconfig* cfg) {
 
                 case 'J':
                     cfg->compileropt[strlen(cfg->compileropt)] = ' ';
-                    i = mcx_readarg(argc, argv, i, cfg->compileropt + strlen(cfg->compileropt), "string");
+                    i = mcx_readstrarg(argc, argv, i, cfg->compileropt + strlen(cfg->compileropt), sizeof(cfg->compileropt) - strlen(cfg->compileropt));
                     break;
 
                 case 'o':
@@ -4263,7 +4493,7 @@ void mcx_parsecmd(int argc, char* argv[], mcconfig* cfg) {
                     break;
 
                 case 'A':
-                    i = mcx_readarg(argc, argv, i, &(cfg->autopilot), "int");
+                    i = mcx_readarg(argc, argv, i, &(cfg->autopilot), "bool");
                     break;
 
                 case 'c':
@@ -4281,7 +4511,7 @@ void mcx_parsecmd(int argc, char* argv[], mcconfig* cfg) {
 
                 case 'G':
                     if (mcx_isbinstr(argv[i + 1])) {
-                        i = mcx_readarg(argc, argv, i, cfg->deviceid, "string");
+                        i = mcx_readstrarg(argc, argv, i, cfg->deviceid, sizeof(cfg->deviceid));
                         break;
                     } else {
                         i = mcx_readarg(argc, argv, i, &(cfg->gpuid), "int");
@@ -4404,7 +4634,7 @@ void mcx_parsecmd(int argc, char* argv[], mcconfig* cfg) {
                     } else if (strcmp(argv[i] + 2, "atomic") == 0) {
                         i = mcx_readarg(argc, argv, i, &(cfg->isatomic), "bool");
                     } else if (strcmp(argv[i] + 2, "root") == 0) {
-                        i = mcx_readarg(argc, argv, i, cfg->rootpath, "string");
+                        i = mcx_readstrarg(argc, argv, i, cfg->rootpath, sizeof(cfg->rootpath));
                     } else if (strcmp(argv[i] + 2, "dumpjson") == 0) {
                         cfg->jsonfile[0] = '-';
 
@@ -4415,15 +4645,15 @@ void mcx_parsecmd(int argc, char* argv[], mcconfig* cfg) {
                             cfg->isdumpjson = 1;
                         } else if (!isdigit((int)(argv[i + 1][0]))) {
                             cfg->isdumpjson = 1;
-                            memcpy(cfg->jsonfile, argv[i + 1], MIN(strlen(argv[i + 1]), MAX_PATH_LENGTH));
+                            snprintf(cfg->jsonfile, sizeof(cfg->jsonfile), "%s", argv[i + 1]); /* memcpy of MAX_PATH_LENGTH left no terminator */
                             i++;
                         } else {
-                            i = mcx_readarg(argc, argv, i, &(cfg->isdumpjson), "int");
+                            i = mcx_readarg(argc, argv, i, &(cfg->isdumpjson), "bool");
                         }
                     } else if (strcmp(argv[i] + 2, "debugphoton") == 0) {
                         i = mcx_readarg(argc, argv, i, &(cfg->debugphoton), "int");
                     } else if (strcmp(argv[i] + 2, "kernel") == 0) {
-                        i = mcx_readarg(argc, argv, i, cfg->kernelfile, "string");
+                        i = mcx_readstrarg(argc, argv, i, cfg->kernelfile, sizeof(cfg->kernelfile));
                     } else if (strcmp(argv[i] + 2, "maxjumpdebug") == 0) {
                         i = mcx_readarg(argc, argv, i, &(cfg->maxjumpdebug), "int");
                     } else if (strcmp(argv[i] + 2, "gridsize") == 0) {
