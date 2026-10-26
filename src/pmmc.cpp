@@ -130,7 +130,7 @@ void parse_config(const py::dict& user_cfg, mcconfig& mcx_config, tetmesh& mesh)
     GET_SCALAR_FIELD(user_cfg, mcx_config, isreflect, py::int_);
     GET_SCALAR_FIELD(user_cfg, mcx_config, isspecular, py::int_);
     GET_SCALAR_FIELD(user_cfg, mcx_config, ismomentum, py::bool_);
-    GET_SCALAR_FIELD(user_cfg, mcx_config, issaveexit, py::bool_);
+    GET_SCALAR_FIELD(user_cfg, mcx_config, issaveexit, py::int_); /* 2 saves a detector image */
     GET_SCALAR_FIELD(user_cfg, mcx_config, isextdet, py::bool_);
     GET_SCALAR_FIELD(user_cfg, mcx_config, issave2pt, py::bool_);
     GET_SCALAR_FIELD(user_cfg, mcx_config, issavedet, py::int_);
@@ -322,6 +322,7 @@ void parse_config(const py::dict& user_cfg, mcconfig& mcx_config, tetmesh& mesh)
         mesh.noderoi = (float*) malloc(mesh.nn * sizeof(float));
         auto val = static_cast<float*>(buffer_info.ptr);
         memcpy(mesh.noderoi, val, mesh.nn * sizeof(float));
+        mcx_config.implicit = 1; /* enable implicit MMC (iMMC), as mmclab */
     }
 
 
@@ -351,6 +352,8 @@ void parse_config(const py::dict& user_cfg, mcconfig& mcx_config, tetmesh& mesh)
             for (int i = 0; i < mesh.ne; i++) {
                 mesh.edgeroi[i * 6 + j] = val[j * mesh.ne + i];
             }
+
+        mcx_config.implicit = 1; /* edge-based iMMC */
     }
 
 
@@ -380,6 +383,8 @@ void parse_config(const py::dict& user_cfg, mcconfig& mcx_config, tetmesh& mesh)
             for (int i = 0; i < mesh.ne; i++) {
                 mesh.faceroi[i * 4 + j] = val[j * mesh.ne + i];
             }
+
+        mcx_config.implicit = 2; /* face-based iMMC */
     }
 
 
@@ -676,7 +681,7 @@ void parse_config(const py::dict& user_cfg, mcconfig& mcx_config, tetmesh& mesh)
 
     if (user_cfg.contains("compute")) {
         std::string compute_str = py::str(user_cfg["compute"]);
-        const char* computebackend[] = {"sse", "opencl", "cuda", ""};
+        const char* computebackend[] = {"sse", "opencl", "cuda", "optix", ""};  /* as mmclab; without OptiX, "optix" runs OpenCL */
 
         if (compute_str.empty()) {
             throw py::value_error("the 'compute' field must be a non-empty string");
@@ -692,7 +697,6 @@ void parse_config(const py::dict& user_cfg, mcconfig& mcx_config, tetmesh& mesh)
 
     if (user_cfg.contains("debuglevel")) {
         std::string debug_level = py::str(user_cfg["debuglevel"]);
-        const char debugflag[] = {'R', 'M', 'P', '\0'};
         char debuglevel[MAX_SESSION_LENGTH] = {'\0'};
 
         if (debug_level.empty()) {
@@ -704,6 +708,7 @@ void parse_config(const py::dict& user_cfg, mcconfig& mcx_config, tetmesh& mesh)
         }
 
         strncpy(debuglevel, debug_level.c_str(), MAX_SESSION_LENGTH);
+        /* the same flags as mmc -D and mmclab, e.g. 'T' timing, 'P' progress, 'M' trajectories (dlTraj) */
         mcx_config.debuglevel = mcx_parsedebugopt(debuglevel, debugflag);
 
         if (mcx_config.debuglevel == 0) {
@@ -723,6 +728,10 @@ void parse_config(const py::dict& user_cfg, mcconfig& mcx_config, tetmesh& mesh)
 
         if (mcx_config.srcpattern) {
             free(mcx_config.srcpattern);
+        }
+
+        if (buffer_info.ndim == 3) { /* a stack of patterns for photon sharing, [srcnum, Nx, Ny], as in mmclab */
+            mcx_config.srcnum = buffer_info.shape[0];
         }
 
         mcx_config.srcpattern = (float*) malloc(buffer_info.size * sizeof(float));
@@ -797,15 +806,16 @@ void parse_config(const py::dict& user_cfg, mcconfig& mcx_config, tetmesh& mesh)
         auto gpu_id_value = user_cfg["gpuid"];
 
         if (py::int_::check_(gpu_id_value)) {
-            mcx_config.gpuid = py::int_(gpu_id_value);
+            int gpuid = py::int_(gpu_id_value);
+            mcx_config.gpuid = gpuid;
             memset(mcx_config.deviceid, 0, MAX_DEVICE);
 
-            if (mcx_config.gpuid > 0 && mcx_config.gpuid < MAX_DEVICE) {
+            if (gpuid >= MAX_DEVICE) {
+                throw py::value_error("GPU id can not be more than 256");
+            } else if (gpuid > 0) {
                 memset(mcx_config.deviceid, '0', mcx_config.gpuid - 1);
                 mcx_config.deviceid[mcx_config.gpuid - 1] = '1';
-            } else {
-                throw py::value_error("GPU id must be positive and can not be more than 256");
-            }
+            } /* gpuid<=0, e.g. -1 to run on the CPU, is passed on as in mmclab */
         } else if (py::str::check_(gpu_id_value)) {
             std::string gpu_id_string_value = py::str(gpu_id_value);
 
@@ -941,6 +951,11 @@ py::dict pmmc_interface(const py::dict& user_cfg) {
 
         mcx_python_flush();
 
+        /** Find the source (-1) and wide-field detector (-2) elements first, as mmclab does: it sets
+         *  cfg.isextdet, which mmc_validate_config (keeping issavedet) and mesh_validate (the medium
+         *  of the detector elements) need */
+        mesh_srcdetelem(&mesh, &mcx_config);
+
         /** Validate all input fields, and warn incompatible inputs */
         mmc_validate_config(&mcx_config, det_ps, dim_det_ps, seed_byte);
 
@@ -1044,14 +1059,12 @@ py::dict pmmc_interface(const py::dict& user_cfg) {
             mcx_config.photonseed = malloc(mcx_config.maxdetphoton * sizeof(RandType) * RAND_BUF_LEN);
         }
 
-        if (mcx_config.debuglevel & MCX_DEBUG_MOVE) {
+        if (mcx_config.debuglevel & dlTraj) {
             mcx_config.exportdebugdata = (float*)malloc(mcx_config.maxjumpdebug * sizeof(float) * MCX_DEBUG_REC_LEN);
             mcx_config.debuglevel |= dlTraj;
         }
 
-        mesh_srcdetelem(&mesh, &mcx_config);
-
-        /* (detector-as-adjoint-source append now runs above, before
+        /* (mesh_srcdetelem and the detector-as-adjoint-source append run above, before
          * mesh_validate, so mesh.weight is sized for the correct nsrcslots.) */
 
         if (mcx_config.isgpuinfo == 0) {
@@ -1093,14 +1106,14 @@ py::dict pmmc_interface(const py::dict& user_cfg) {
             throw py::runtime_error("PMMC terminated due to an exception!");
         }
 
-        if (mcx_config.debuglevel & MCX_DEBUG_MOVE) {
+        if (mcx_config.debuglevel & dlTraj) {
             field_dim[0] = MCX_DEBUG_REC_LEN;
             field_dim[1] = mcx_config.debugdatalen; // his.savedphoton is for one repetition, should correct
             field_dim[2] = 0;
             field_dim[3] = 0;
             auto photon_traj_data = py::array_t<float, py::array::f_style>({field_dim[0], field_dim[1]});
 
-            if (mcx_config.debuglevel & MCX_DEBUG_MOVE) {
+            if (mcx_config.debuglevel & dlTraj) {
                 memcpy(photon_traj_data.mutable_data(), mcx_config.exportdebugdata, field_dim[0] * field_dim[1] * sizeof(float));
             }
 
@@ -1144,10 +1157,12 @@ py::dict pmmc_interface(const py::dict& user_cfg) {
                 field_dim[3] = 0;
 
                 if (field_dim[0] * field_dim[1] > 0) {
-                    auto partial_path = py::array_t<float, py::array::f_style>(std::initializer_list<size_t>({field_dim[0], field_dim[1], field_dim[2]}));
-                    memcpy(partial_path.mutable_data(), mcx_config.exportdetected,
-                           field_dim[0] * field_dim[1] * field_dim[2] * sizeof(float));
-                    output["detp"] = partial_path;
+                    /* bin the detected photons into a detparam1.w x detparam2.w x maxgate image, as mmclab */
+                    auto detimage = py::array_t<float, py::array::f_style>(std::initializer_list<size_t>({field_dim[0], field_dim[1], field_dim[2]}));
+                    float* detmap = static_cast<float*>(detimage.mutable_data());
+                    memset(detmap, 0, field_dim[0] * field_dim[1] * field_dim[2] * sizeof(float));
+                    mesh_getdetimage(detmap, mcx_config.exportdetected, mcx_config.detectedcount, &mcx_config, &mesh);
+                    output["detp"] = detimage;
                 }
             }
 

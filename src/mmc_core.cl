@@ -29,6 +29,13 @@
 **          GPL v3, see LICENSE.txt for details
 *******************************************************************************/
 
+#if !defined(__NVCC__) && defined(__clang__)
+/* the JIT flags (-Dgcfg* with USE_MACRO_CONST, MCX_SRC_*, ...) fold to constants on purpose so
+   that dead branches are removed; clang-based compilers (AMD, Intel, POCL) would warn about every
+   && / || with such a constant operand */
+#pragma clang diagnostic ignored "-Wconstant-logical-operand"
+#endif
+
 #ifdef __NVCC__
 #define __constant const
 #define __private
@@ -1952,7 +1959,12 @@ __device__ void onephoton(unsigned int id, __local float* ppath, __constant MCXP
 
                 if (GPU_PARAM(gcfg, issaveref) && r.eid < 0 && dref) {
                     int tshift = MIN( ((int)((r.photontimer - gcfg->tstart) * GPU_PARAM(gcfg, Rtstep))), GPU_PARAM(gcfg, maxgate) - 1 ) * GPU_PARAM(gcfg, nf);
+                    /* many threads exit through the same faces near the source; a plain += loses updates */
+#ifdef USE_ATOMIC
+                    atomicadd(dref + ((-r.eid) - 1) + tshift, r.weight);
+#else
                     dref[((-r.eid) - 1) + tshift] += r.weight;
+#endif
                 }
 
 #endif
