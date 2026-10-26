@@ -651,7 +651,8 @@ void mesh_loadelem(tetmesh* mesh, mcconfig* cfg) {
         mesh->type = (int*)malloc(sizeof(int ) * mesh->ne);
 
         datalen = (cfg->method == rtBLBadouelGrid) ? cfg->crop0.z : ( (cfg->basisorder) ? mesh->nn : mesh->ne);
-        mesh->weight = (double*)calloc(sizeof(double) * datalen, cfg->maxgate * cfg->srcnum);
+        /* one slot per source for multi-source (srcid<=0) and adjoint runs, as in mesh_validate */
+        mesh->weight = (double*)calloc(sizeof(double) * datalen, cfg->maxgate * ((cfg->extrasrclen > cfg->srcnum) ? cfg->extrasrclen : cfg->srcnum));
 
         for (i = 0; i < mesh->ne; i++) {
             for (j = 0; j < mesh->elemlen; j++) {
@@ -685,7 +686,8 @@ void mesh_loadelem(tetmesh* mesh, mcconfig* cfg) {
     mesh->type = (int*)malloc(sizeof(int ) * mesh->ne);
 
     datalen = (cfg->method == rtBLBadouelGrid) ? cfg->crop0.z : ( (cfg->basisorder) ? mesh->nn : mesh->ne);
-    mesh->weight = (double*)calloc(sizeof(double) * datalen, cfg->maxgate * cfg->srcnum);
+    /* one slot per source for multi-source (srcid<=0) and adjoint runs, as in mesh_validate */
+    mesh->weight = (double*)calloc(sizeof(double) * datalen, cfg->maxgate * ((cfg->extrasrclen > cfg->srcnum) ? cfg->extrasrclen : cfg->srcnum));
 
     for (i = 0; i < mesh->ne; i++) {
         pe = mesh->elem + i * mesh->elemlen;
@@ -908,35 +910,34 @@ void mesh_loadseedfile(tetmesh* mesh, mcconfig* cfg) {
 
 
 void mesh_getvolume(tetmesh* mesh, mcconfig* cfg) {
-    float dx, dy, dz;
-    int i, j;
+    int i, j, k;
 
     mesh->evol = (float*)calloc(sizeof(float), mesh->ne);
     mesh->nvol = (float*)calloc(sizeof(float), mesh->nn);
 
     for (i = 0; i < mesh->ne; i++) {
         int* ee = (int*)(mesh->elem + i * mesh->elemlen);
+        double a[3], b[3], c[3], vol, len = 0.0;
 
-        dx = mesh->node[ee[2] - 1].x - mesh->node[ee[3] - 1].x;
-        dy = mesh->node[ee[2] - 1].y - mesh->node[ee[3] - 1].y;
-        dz = mesh->node[ee[2] - 1].z - mesh->node[ee[3] - 1].z;
+        /* signed volume (x6) in double precision, relative to node 0 */
+        for (k = 0; k < 3; k++) {
+            a[k] = (double)(&mesh->node[ee[1] - 1].x)[k] - (&mesh->node[ee[0] - 1].x)[k];
+            b[k] = (double)(&mesh->node[ee[2] - 1].x)[k] - (&mesh->node[ee[0] - 1].x)[k];
+            c[k] = (double)(&mesh->node[ee[3] - 1].x)[k] - (&mesh->node[ee[0] - 1].x)[k];
+            len = MAX(len, MAX(fabs(a[k]), MAX(fabs(b[k]), fabs(c[k]))));
+        }
 
-        mesh->evol[i] = mesh->node[ee[1] - 1].x * (mesh->node[ee[2] - 1].y * mesh->node[ee[3] - 1].z - mesh->node[ee[2] - 1].z * mesh->node[ee[3] - 1].y)
-                        - mesh->node[ee[1] - 1].y * (mesh->node[ee[2] - 1].x * mesh->node[ee[3] - 1].z - mesh->node[ee[2] - 1].z * mesh->node[ee[3] - 1].x)
-                        + mesh->node[ee[1] - 1].z * (mesh->node[ee[2] - 1].x * mesh->node[ee[3] - 1].y - mesh->node[ee[2] - 1].y * mesh->node[ee[3] - 1].x);
-        mesh->evol[i] += -mesh->node[ee[0] - 1].x * ((mesh->node[ee[2] - 1].y * mesh->node[ee[3] - 1].z - mesh->node[ee[2] - 1].z * mesh->node[ee[3] - 1].y) + mesh->node[ee[1] - 1].y * dz - mesh->node[ee[1] - 1].z * dy);
-        mesh->evol[i] += +mesh->node[ee[0] - 1].y * ((mesh->node[ee[2] - 1].x * mesh->node[ee[3] - 1].z - mesh->node[ee[2] - 1].z * mesh->node[ee[3] - 1].x) + mesh->node[ee[1] - 1].x * dz - mesh->node[ee[1] - 1].z * dx);
-        mesh->evol[i] += -mesh->node[ee[0] - 1].z * ((mesh->node[ee[2] - 1].x * mesh->node[ee[3] - 1].y - mesh->node[ee[2] - 1].y * mesh->node[ee[3] - 1].x) + mesh->node[ee[1] - 1].x * dy - mesh->node[ee[1] - 1].y * dx);
-        mesh->evol[i] = -mesh->evol[i];
+        vol = -(a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0]) + a[2] * (b[0] * c[1] - b[1] * c[0]));
 
-        if (mesh->evol[i] < 0.f) {
+        /* reorient inverted elements; the sign of a flat (sliver) element is round-off noise,
+           and flipping it breaks the face orientation that the ray-tracer relies on */
+        if (vol < -1e-6 * len * len * len) {
             int e1 = ee[3];
             ee[3] = ee [2];
             ee[2] = e1;
-            mesh->evol[i] = -mesh->evol[i];
         }
 
-        mesh->evol[i] *= (1.f / 6.f);
+        mesh->evol[i] = (float)(fabs(vol) / 6.0);
 
         if (mesh->type[i] <= 0) { /* nodal volume of tissue elements only, the only ones receiving fluence */
             continue;
